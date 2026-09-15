@@ -35,6 +35,17 @@ npm run dev
 - `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
 - `GET /api/home` — fileiras estilo Crunchyroll para a home (em alta / populares da temporada / mais populares), com pôster, banner, nota e link direto pro anime quando disponível. Ver "Home" abaixo.
 - `GET /api/skip?animeName=<>&animeUrl=<>&episodeNum=<>` — tempos de abertura/encerramento (AniSkip), pra o botão "Pular abertura". Best-effort: sem match no AniList ou sem dado no AniSkip, devolve `{"op":null,"ed":null}` em vez de erro.
+- `GET /api/manga/home` — mangás populares em português (MangaDex). `GET /api/manga/search?q=` — busca. `GET /api/manga/{id}/chapters` — lista de capítulos em pt-br. `GET /api/manga/chapter/{id}/pages` — resolve as URLs das páginas pro leitor. Ver "Mangás" abaixo.
+
+## Mangás (MangaDex)
+
+Diferente do anime, mangá não precisou de scraper nenhum — a [API do MangaDex](https://api.mangadex.org) é pública, gratuita, sem chave, e é a mesma que a maioria dos leitores de mangá por aí usa. `backend/cmd/server/mangadex.go` é o cliente; sempre filtra `contentRating=safe,suggestive` (nada adulto) e `availableTranslatedLanguage=pt-br` (só mostra o que dá pra ler em português — a cobertura de tradução da comunidade varia bastante por título, então alguns mangás populares aparecem sem nenhum capítulo em pt-br, o que é esperado, não um bug).
+
+A parte com pegadinha é ler um capítulo: o MangaDex não dá a URL da imagem direto — primeiro você pede um servidor de CDN em `/at-home/server/{chapterId}` (esquema deles pra distribuir carga, chamado MangaDex@Home), que devolve um `baseUrl` + hash + lista de arquivos, e só aí monta as URLs das páginas. Isso é resolvido na hora que o usuário abre o capítulo, não antes, e as imagens são carregadas **direto do CDN deles no navegador** — diferente do vídeo de anime, não precisamos proxiar nada aqui.
+
+**Busca unificada**: `/api/search` (anime) e `/api/manga/search` (mangá) rodam em paralelo a cada busca; o frontend guarda os dois resultados separados e um filtro (Todos/Animes/Mangás) só troca o que é exibido, sem precisar buscar de novo ao trocar de filtro.
+
+**Leitor** (`MangaReader.tsx`): paginado/lateral (uma página por vez, navega com as setas do teclado ou clicando nas metades esquerda/direita da imagem) — diferente do leitor padrão do MangaDex, que é scroll vertical infinito. Mais simples de implementar também: lista de páginas fixa, sem rastrear posição de scroll ou lazy-load.
 
 ## Pular abertura/encerramento (AniSkip)
 

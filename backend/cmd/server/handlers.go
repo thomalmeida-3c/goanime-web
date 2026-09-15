@@ -28,6 +28,7 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/home", handleHome)
 	mux.HandleFunc("GET /api/skip", handleSkip)
 	mux.HandleFunc("GET /api/health", handleHealth)
+	registerMangaRoutes(mux)
 }
 
 // skipInterval mirrors models.Skip for the JSON response; nil means "no

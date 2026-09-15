@@ -3,58 +3,82 @@
 import { useEffect, useState } from "react";
 import HeroCarousel from "@/components/HeroCarousel";
 import HomeRow from "@/components/HomeRow";
+import MangaReader from "@/components/MangaReader";
+import MangaRow from "@/components/MangaRow";
 import UpscaledVideoPlayer from "@/components/UpscaledVideoPlayer";
 import {
   type Anime,
+  type ChapterItem,
   type Episode,
   type HomeItem,
   type HomeResponse,
+  type MangaItem,
   type SkipTimesResponse,
+  getChapterPages,
   getEpisodes,
   getHome,
+  getMangaChapters,
+  getMangaHome,
   getSkipTimes,
   getStream,
   playbackUrl,
   searchAnime,
+  searchManga,
 } from "@/lib/api";
 
-type View = "home" | "search" | "episodes" | "player";
+type View = "home" | "search" | "episodes" | "player" | "manga-chapters" | "manga-reader";
+type ContentFilter = "all" | "anime" | "manga";
 
 export default function Home() {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Anime[]>([]);
+  const [animeResults, setAnimeResults] = useState<Anime[]>([]);
+  const [mangaResults, setMangaResults] = useState<MangaItem[]>([]);
+  const [contentFilter, setContentFilter] = useState<ContentFilter>("all");
   const [selectedAnime, setSelectedAnime] = useState<Anime | null>(null);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [skipTimes, setSkipTimes] = useState<SkipTimesResponse | null>(null);
+  const [selectedManga, setSelectedManga] = useState<MangaItem | null>(null);
+  const [chapters, setChapters] = useState<ChapterItem[]>([]);
+  const [selectedChapter, setSelectedChapter] = useState<ChapterItem | null>(null);
+  const [chapterPages, setChapterPages] = useState<string[]>([]);
   const [view, setView] = useState<View>("home");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
+  const [mangaHome, setMangaHome] = useState<MangaItem[]>([]);
 
   useEffect(() => {
     getHome()
       .then(setHome)
       .catch((err) => setHomeError(err instanceof Error ? err.message : "Falha ao carregar a home"));
+    getMangaHome()
+      .then((res) => setMangaHome(res.popular))
+      .catch(() => {}); // best-effort row; the anime home still works without it
   }, []);
 
   // Home only carries AniList metadata (title/poster/synopsis) — it never
   // resolves a source. Picking a title (from the hero, a row, or the search
   // bar) always lands here: a plain text search across our own sources,
-  // exactly like typing it in manually.
+  // exactly like typing it in manually. Manga is searched in parallel —
+  // MangaDex is a separate catalog, not one of our scraper sources.
   async function runSearch(q: string) {
     if (!q.trim()) return;
     setQuery(q);
     setLoading(true);
     setError(null);
     try {
-      const animes = await searchAnime(q.trim());
-      setResults(animes);
+      const [animes, mangas] = await Promise.all([
+        searchAnime(q.trim()).catch(() => []),
+        searchManga(q.trim()).catch(() => []),
+      ]);
+      setAnimeResults(animes);
+      setMangaResults(mangas);
       setView("search");
-      if (animes.length === 0) {
+      if (animes.length === 0 && mangas.length === 0) {
         setError("Nenhum resultado encontrado.");
       }
     } catch (err) {
@@ -115,12 +139,51 @@ export default function Home() {
     }
   }
 
+  // Manga home cards carry a real MangaDex id already (unlike anime, where
+  // AniList's home data never maps to a scraper URL) — so unlike
+  // handleSelectHomeItem, this goes straight to the chapter list instead of
+  // routing through a search.
+  async function handleSelectManga(manga: MangaItem) {
+    setSelectedManga(manga);
+    setLoading(true);
+    setError(null);
+    try {
+      const chs = await getMangaChapters(manga.id);
+      setChapters(chs);
+      setView("manga-chapters");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao carregar capítulos");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSelectChapter(chapter: ChapterItem) {
+    setSelectedChapter(chapter);
+    setLoading(true);
+    setError(null);
+    setChapterPages([]);
+    try {
+      const res = await getChapterPages(chapter.id);
+      setChapterPages(res.pages);
+      setView("manga-reader");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao carregar as páginas");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function goHome() {
     setView("home");
     setQuery("");
-    setResults([]);
+    setAnimeResults([]);
+    setMangaResults([]);
+    setContentFilter("all");
     setSelectedAnime(null);
     setEpisodes([]);
+    setSelectedManga(null);
+    setChapters([]);
     setError(null);
   }
 
@@ -128,12 +191,20 @@ export default function Home() {
     setView("search");
     setSelectedAnime(null);
     setEpisodes([]);
+    setSelectedManga(null);
+    setChapters([]);
   }
 
   function backToEpisodes() {
     setView("episodes");
     setSelectedEpisode(null);
     setVideoSrc(null);
+  }
+
+  function backToChapters() {
+    setView("manga-chapters");
+    setSelectedChapter(null);
+    setChapterPages([]);
   }
 
   const currentEpisodeIndex = selectedEpisode
@@ -157,7 +228,7 @@ export default function Home() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar anime..."
+              placeholder="Buscar anime ou mangá..."
               className="flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-4 py-1.5 text-sm outline-none focus:border-neutral-500"
             />
             <button
@@ -175,10 +246,10 @@ export default function Home() {
         {view === "home" && (
           <>
             {homeError && <p className="mb-4 text-sm text-purple-400">{homeError}</p>}
-            {home && (
-              <>
-                <HeroCarousel items={home.trending.slice(0, 6)} onSelect={handleSelectHomeItem} />
-                <div className="mx-auto max-w-6xl">
+            {home && <HeroCarousel items={home.trending.slice(0, 6)} onSelect={handleSelectHomeItem} />}
+            <div className="mx-auto max-w-6xl">
+              {home && (
+                <>
                   <HomeRow
                     title="Animes em alta no Brasil"
                     items={home.trending}
@@ -194,9 +265,10 @@ export default function Home() {
                     items={home.allTimePopular}
                     onSelect={handleSelectHomeItem}
                   />
-                </div>
-              </>
-            )}
+                </>
+              )}
+              <MangaRow title="Mangás" items={mangaHome} onSelect={handleSelectManga} />
+            </div>
           </>
         )}
 
@@ -205,36 +277,88 @@ export default function Home() {
             <button onClick={goHome} className="mb-4 text-sm text-neutral-400 hover:text-neutral-200">
               ← Voltar para a home
             </button>
+
+            <div className="mb-4 flex gap-2">
+              {(
+                [
+                  ["all", `Todos (${animeResults.length + mangaResults.length})`],
+                  ["anime", `Animes (${animeResults.length})`],
+                  ["manga", `Mangás (${mangaResults.length})`],
+                ] as [ContentFilter, string][]
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setContentFilter(value)}
+                  className={`rounded-md px-3 py-1.5 text-sm ${
+                    contentFilter === value
+                      ? "bg-purple-600 text-white"
+                      : "bg-neutral-900 text-neutral-400 hover:text-neutral-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
             {loading && <p className="mb-4 text-sm text-neutral-400">Buscando...</p>}
             {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
 
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
-              {results.map((anime, i) => (
-                <button
-                  key={`${anime.Source}-${anime.URL}-${i}`}
-                  onClick={() => handleSelectAnime(anime)}
-                  className="group text-left"
-                >
-                  <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-neutral-900">
-                    {anime.ImageURL ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={anime.ImageURL}
-                        alt={anime.Name}
-                        className="h-full w-full object-cover transition group-hover:scale-105"
-                      />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-xs text-neutral-600">
-                        sem imagem
-                      </div>
-                    )}
-                    <span className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-neutral-200">
-                      {anime.Source}
-                    </span>
-                  </div>
-                  <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">{anime.Name}</p>
-                </button>
-              ))}
+              {contentFilter !== "manga" &&
+                animeResults.map((anime, i) => (
+                  <button
+                    key={`anime-${anime.Source}-${anime.URL}-${i}`}
+                    onClick={() => handleSelectAnime(anime)}
+                    className="group text-left"
+                  >
+                    <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-neutral-900">
+                      {anime.ImageURL ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={anime.ImageURL}
+                          alt={anime.Name}
+                          className="h-full w-full object-cover transition group-hover:scale-105"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-neutral-600">
+                          sem imagem
+                        </div>
+                      )}
+                      <span className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-neutral-200">
+                        {anime.Source}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">{anime.Name}</p>
+                  </button>
+                ))}
+
+              {contentFilter !== "anime" &&
+                mangaResults.map((manga) => (
+                  <button
+                    key={`manga-${manga.id}`}
+                    onClick={() => handleSelectManga(manga)}
+                    className="group text-left"
+                  >
+                    <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-neutral-900">
+                      {manga.coverUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={manga.coverUrl}
+                          alt={manga.title}
+                          className="h-full w-full object-cover transition group-hover:scale-105"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-xs text-neutral-600">
+                          sem capa
+                        </div>
+                      )}
+                      <span className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-neutral-200">
+                        Mangá
+                      </span>
+                    </div>
+                    <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">{manga.title}</p>
+                  </button>
+                ))}
             </div>
           </>
         )}
@@ -344,6 +468,72 @@ export default function Home() {
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {view === "manga-chapters" && selectedManga && (
+          <div className="px-6 py-6">
+            <button onClick={backToSearch} className="mb-4 text-sm text-neutral-400 hover:text-neutral-200">
+              ← Voltar
+            </button>
+            <div className="mb-6 flex gap-4">
+              {selectedManga.coverUrl && (
+                <div className="relative h-40 w-28 shrink-0 overflow-hidden rounded-lg bg-neutral-900">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={selectedManga.coverUrl}
+                    alt={selectedManga.title}
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+              )}
+              <div>
+                <h2 className="text-lg font-semibold">{selectedManga.title}</h2>
+                <p className="text-sm text-neutral-400">Mangá — MangaDex</p>
+                {selectedManga.description && (
+                  <p className="mt-2 line-clamp-4 max-w-xl text-sm text-neutral-400">
+                    {selectedManga.description}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+            {loading && <p className="text-sm text-neutral-400">Carregando...</p>}
+            {!loading && chapters.length === 0 && !error && (
+              <p className="text-sm text-neutral-400">Nenhum capítulo em português encontrado.</p>
+            )}
+
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+              {chapters.map((ch) => (
+                <button
+                  key={ch.id}
+                  onClick={() => handleSelectChapter(ch)}
+                  className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-left text-sm hover:border-neutral-600"
+                >
+                  Cap. {ch.chapter}
+                  {ch.title ? ` — ${ch.title}` : ""}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {view === "manga-reader" && selectedManga && selectedChapter && (
+          <div className="px-6 py-6">
+            <div className="mb-4 flex items-center justify-between">
+              <button onClick={backToChapters} className="text-sm text-neutral-400 hover:text-neutral-200">
+                ← Voltar para capítulos
+              </button>
+              <h2 className="text-sm font-semibold text-neutral-300">
+                {selectedManga.title} — Cap. {selectedChapter.chapter}
+              </h2>
+            </div>
+
+            {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+            {loading && <p className="text-sm text-neutral-400">Carregando páginas...</p>}
+
+            {!loading && <MangaReader pages={chapterPages} />}
           </div>
         )}
       </main>

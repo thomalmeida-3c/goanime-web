@@ -129,3 +129,37 @@ export function getSkipTimes(
 export function playbackUrl(path: string): string {
   return API_BASE + path;
 }
+
+export type MangaItem = {
+  id: string;
+  title: string;
+  description?: string;
+  coverUrl?: string;
+  tags?: string[];
+  contentRating?: string;
+  year?: number;
+};
+
+export type ChapterItem = {
+  id: string;
+  chapter: string;
+  title?: string;
+};
+
+export type ChapterPagesResponse = { pages: string[] };
+
+export function getMangaHome(): Promise<{ popular: MangaItem[] }> {
+  return request("/api/manga/home", {});
+}
+
+export function searchManga(query: string): Promise<MangaItem[]> {
+  return request<MangaItem[]>("/api/manga/search", { q: query });
+}
+
+export function getMangaChapters(mangaId: string): Promise<ChapterItem[]> {
+  return request<ChapterItem[]>(`/api/manga/${mangaId}/chapters`, {});
+}
+
+export function getChapterPages(chapterId: string): Promise<ChapterPagesResponse> {
+  return request<ChapterPagesResponse>(`/api/manga/chapter/${chapterId}/pages`, {});
+}
