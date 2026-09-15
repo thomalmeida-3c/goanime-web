@@ -27,6 +27,36 @@ func registerMangaRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/manga/pages", handleChapterPages)
 }
 
+// fanMangaLivre runs the mangalivre.to and mangalivre.blog fetchers for one
+// listing in parallel and merges what comes back — same idea as /api/search
+// fanning anime sources out. Neither failing the other: an error from one
+// source just means fewer results, not a broken request (mirrors how the
+// anime search already tolerates a source being down).
+func fanMangaLivre(
+	toFn func(context.Context, int) ([]MangaItem, error),
+	blogFn func(context.Context, int) ([]MangaItem, error),
+	ctx context.Context,
+	limit int,
+) []MangaItem {
+	var wg sync.WaitGroup
+	var to, blog []MangaItem
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		to, _ = toFn(ctx, limit)
+	}()
+	go func() {
+		defer wg.Done()
+		blog, _ = blogFn(ctx, limit)
+	}()
+	wg.Wait()
+
+	merged := make([]MangaItem, 0, len(to)+len(blog))
+	merged = append(merged, to...)
+	merged = append(merged, blog...)
+	return merged
+}
+
 // handleMangaLatest serves the "recém adicionados" row for the dedicated
 // Mangás page, cached the same way as handleMangaHome.
 func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
@@ -42,11 +72,7 @@ func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items, err := fetchMangaLivreLatest(ctx, 18)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
+	items := fanMangaLivre(fetchMangaLivreLatest, fetchMangaLivreBlogLatest, ctx, 12)
 
 	mangaLatestCacheMu.Lock()
 	mangaLatestCache = items
@@ -59,9 +85,9 @@ func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
 // handleMangaHome serves the "popular" manga row, cached like /api/home —
 // same reasoning: cheap to cache, no reason to hit the source on every
 // load. MangaDex support (mangadex.go) is still here and working, just not
-// wired into the listing right now — MangaLivre alone is what's shown, per
-// request; swapping back (or fanning both out like /api/search does for
-// anime) is a one-line change in this handler if that's wanted later.
+// wired into the listing right now — that one stayed out deliberately (see
+// README "MangaDex"); mangalivre.to and mangalivre.blog are both real,
+// working sources with different catalogs, so both are fanned out here.
 func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	mangaHomeCacheMu.Lock()
 	if mangaHomeCache != nil && time.Since(mangaHomeCacheAt) < mangaHomeCacheTTL {
@@ -75,11 +101,7 @@ func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items, err := fetchMangaLivrePopular(ctx, 18)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
+	items := fanMangaLivre(fetchMangaLivrePopular, fetchMangaLivreBlogPopular, ctx, 12)
 
 	mangaHomeCacheMu.Lock()
 	mangaHomeCache = items
@@ -89,8 +111,9 @@ func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"popular": items})
 }
 
-// handleMangaSearch searches MangaLivre only (see handleMangaHome's note —
-// MangaDex is still there, just not called from the listing right now).
+// handleMangaSearch fans out to both MangaLivre sources in parallel and
+// merges — see fanMangaLivre. MangaDex is still there, just not called from
+// the listing right now (see README "MangaDex").
 func handleMangaSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
@@ -101,11 +124,11 @@ func handleMangaSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items, err := searchMangaLivre(ctx, q, 24)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return
-	}
+	items := fanMangaLivre(
+		func(ctx context.Context, limit int) ([]MangaItem, error) { return searchMangaLivre(ctx, q, limit) },
+		func(ctx context.Context, limit int) ([]MangaItem, error) { return searchMangaLivreBlog(ctx, q, limit) },
+		ctx, 24,
+	)
 
 	rankMangaByRelevance(q, items)
 	writeJSON(w, http.StatusOK, items)
@@ -133,6 +156,8 @@ func handleMangaChapters(w http.ResponseWriter, r *http.Request) {
 	switch source {
 	case "MangaLivre":
 		chapters, err = fetchMangaLivreChapters(ctx, id)
+	case "MangaLivre.blog":
+		chapters, err = fetchMangaLivreBlogChapters(ctx, id)
 	default:
 		var raw []mdChapter
 		raw, err = fetchMangaChapters(ctx, id)
@@ -171,6 +196,8 @@ func handleChapterPages(w http.ResponseWriter, r *http.Request) {
 	switch source {
 	case "MangaLivre":
 		pages, err = resolveMangaLivreChapterPages(ctx, id)
+	case "MangaLivre.blog":
+		pages, err = resolveMangaLivreBlogChapterPages(ctx, id)
 	default:
 		pages, err = resolveChapterPages(ctx, id)
 	}
