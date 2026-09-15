@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -21,7 +22,25 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/episodes", handleEpisodes)
 	mux.HandleFunc("GET /api/stream", handleStream)
 	mux.HandleFunc("GET /api/proxy/{id}", handleProxy)
+	mux.HandleFunc("GET /api/home", handleHome)
 	mux.HandleFunc("GET /api/health", handleHealth)
+}
+
+// handleHome serves the trending/seasonal/all-time-popular rows for the
+// homepage (AniList rankings, matched to a playable Goyabu title where
+// possible — see home.go). A cold cache means dozens of live scrapes, so
+// this gets a generous timeout instead of the request's default context.
+func handleHome(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+
+	home, err := getHome(ctx)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, home)
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

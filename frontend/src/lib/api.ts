@@ -59,6 +59,25 @@ export type StreamResponse = {
   metadata: Record<string, string> | null;
 };
 
+export type HomeItem = {
+  anilistId: number;
+  title: string;
+  imageUrl: string;
+  bannerUrl?: string;
+  description?: string;
+  score?: number;
+  genres?: string[];
+  animeUrl?: string;
+  source?: string;
+};
+
+export type HomeResponse = {
+  trending: HomeItem[];
+  seasonPopular: HomeItem[];
+  allTimePopular: HomeItem[];
+  generatedAt: string;
+};
+
 type ApiError = { error: string };
 
 async function request<T>(path: string, params: Record<string, string>): Promise<T> {
@@ -85,6 +104,10 @@ export function getEpisodes(animeUrl: string, source: string): Promise<Episode[]
 
 export function getStream(episodeUrl: string, source: string): Promise<StreamResponse> {
   return request<StreamResponse>("/api/stream", { episodeUrl, source });
+}
+
+export function getHome(): Promise<HomeResponse> {
+  return request<HomeResponse>("/api/home", {});
 }
 
 export function playbackUrl(path: string): string {

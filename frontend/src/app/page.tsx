@@ -1,16 +1,33 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import HomeRow from "@/components/HomeRow";
 import {
   type Anime,
   type Episode,
+  type HomeItem,
+  type HomeResponse,
   getEpisodes,
+  getHome,
   getStream,
   playbackUrl,
   searchAnime,
 } from "@/lib/api";
 
-type View = "search" | "episodes" | "player";
+type View = "home" | "search" | "episodes" | "player";
+
+function homeItemToAnime(item: HomeItem): Anime {
+  return {
+    Name: item.title,
+    URL: item.animeUrl ?? "",
+    ImageURL: item.imageUrl,
+    Episodes: null,
+    AnilistID: item.anilistId,
+    MalID: 0,
+    Source: item.source ?? "",
+    Details: null,
+  };
+}
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -19,9 +36,20 @@ export default function Home() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
-  const [view, setView] = useState<View>("search");
+  const [view, setView] = useState<View>("home");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [home, setHome] = useState<HomeResponse | null>(null);
+  const [homeLoading, setHomeLoading] = useState(true);
+  const [homeError, setHomeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getHome()
+      .then(setHome)
+      .catch((err) => setHomeError(err instanceof Error ? err.message : "Falha ao carregar a home"))
+      .finally(() => setHomeLoading(false));
+  }, []);
 
   async function handleSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -31,6 +59,7 @@ export default function Home() {
     try {
       const animes = await searchAnime(query.trim());
       setResults(animes);
+      setView("search");
       if (animes.length === 0) {
         setError("Nenhum resultado encontrado.");
       }
@@ -56,6 +85,11 @@ export default function Home() {
     }
   }
 
+  function handleSelectHomeItem(item: HomeItem) {
+    if (!item.animeUrl || !item.source) return;
+    handleSelectAnime(homeItemToAnime(item));
+  }
+
   async function handleSelectEpisode(episode: Episode) {
     if (!selectedAnime) return;
     setSelectedEpisode(episode);
@@ -73,6 +107,15 @@ export default function Home() {
     }
   }
 
+  function goHome() {
+    setView("home");
+    setQuery("");
+    setResults([]);
+    setSelectedAnime(null);
+    setEpisodes([]);
+    setError(null);
+  }
+
   function backToSearch() {
     setView("search");
     setSelectedAnime(null);
@@ -85,35 +128,93 @@ export default function Home() {
     setVideoSrc(null);
   }
 
+  const heroItem = home?.trending?.[0];
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <header className="border-b border-neutral-800 px-6 py-4">
-        <h1 className="text-xl font-semibold tracking-tight">GoAnime Web</h1>
-        <p className="text-sm text-neutral-400">
-          MVP: frontend Next.js consumindo o backend Go adaptado do GoAnime
-        </p>
+      <header className="sticky top-0 z-10 border-b border-neutral-800 bg-neutral-950/90 px-6 py-3 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center gap-4">
+          <button onClick={goHome} className="shrink-0 text-lg font-semibold tracking-tight">
+            GoAnime Web
+          </button>
+          <form onSubmit={handleSearch} className="flex flex-1 gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar anime..."
+              className="flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-4 py-1.5 text-sm outline-none focus:border-neutral-500"
+            />
+            <button
+              type="submit"
+              disabled={loading}
+              className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {loading ? "Buscando..." : "Buscar"}
+            </button>
+          </form>
+        </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-6 py-8">
+      <main className="mx-auto max-w-6xl px-6 py-8">
+        {view === "home" && (
+          <>
+            {heroItem?.bannerUrl && (
+              <div className="relative mb-8 h-56 overflow-hidden rounded-xl sm:h-72">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={heroItem.bannerUrl}
+                  alt={heroItem.title}
+                  className="h-full w-full object-cover"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/30 to-transparent" />
+                <div className="absolute bottom-0 left-0 p-5">
+                  <p className="mb-1 text-xs uppercase tracking-wide text-indigo-400">
+                    Em alta agora
+                  </p>
+                  <h2 className="text-2xl font-bold">{heroItem.title}</h2>
+                  {heroItem.animeUrl && heroItem.source && (
+                    <button
+                      onClick={() => handleSelectHomeItem(heroItem)}
+                      className="mt-3 rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-medium hover:bg-indigo-500"
+                    >
+                      Ver episódios
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {homeLoading && (
+              <p className="text-sm text-neutral-400">
+                Carregando destaques (primeira carga pode levar ~20s)...
+              </p>
+            )}
+            {homeError && <p className="text-sm text-red-400">{homeError}</p>}
+
+            {home && (
+              <>
+                <HomeRow title="Em alta" items={home.trending} onSelect={handleSelectHomeItem} />
+                <HomeRow
+                  title="Populares da temporada"
+                  items={home.seasonPopular}
+                  onSelect={handleSelectHomeItem}
+                />
+                <HomeRow
+                  title="Mais populares"
+                  items={home.allTimePopular}
+                  onSelect={handleSelectHomeItem}
+                />
+              </>
+            )}
+          </>
+        )}
+
         {view === "search" && (
           <>
-            <form onSubmit={handleSearch} className="flex gap-2 mb-8">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Buscar anime..."
-                className="flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm outline-none focus:border-neutral-500"
-              />
-              <button
-                type="submit"
-                disabled={loading}
-                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {loading ? "Buscando..." : "Buscar"}
-              </button>
-            </form>
-
+            <button onClick={goHome} className="mb-4 text-sm text-neutral-400 hover:text-neutral-200">
+              ← Voltar para a home
+            </button>
             {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
 
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4">
@@ -140,9 +241,7 @@ export default function Home() {
                       {anime.Source}
                     </span>
                   </div>
-                  <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">
-                    {anime.Name}
-                  </p>
+                  <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">{anime.Name}</p>
                 </button>
               ))}
             </div>
@@ -155,7 +254,7 @@ export default function Home() {
               onClick={backToSearch}
               className="mb-4 text-sm text-neutral-400 hover:text-neutral-200"
             >
-              ← Voltar para a busca
+              ← Voltar
             </button>
             <div className="mb-6 flex gap-4">
               {selectedAnime.ImageURL && (

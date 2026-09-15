@@ -33,6 +33,15 @@ npm run dev
 - `GET /api/episodes?url=<animeUrl>&source=<Source>` — lista episódios.
 - `GET /api/stream?episodeUrl=<url>&source=<Source>&quality=best&mode=sub` — resolve a URL de stream e devolve `playbackUrl` (um endpoint local, `/api/proxy/:id`, que faz o proxy do vídeo já com os headers/token que o provedor exige).
 - `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
+- `GET /api/home` — fileiras estilo Crunchyroll para a home (em alta / populares da temporada / mais populares), com pôster, banner, nota e link direto pro anime quando disponível. Ver "Home" abaixo.
+
+## Home (fileiras "em alta" / "populares")
+
+O GoAnime (e os scrapers que ele usa) não tem nenhum dado próprio de popularidade — não sabemos quantas pessoas assistiram o quê. Pra ter fileiras tipo Crunchyroll, `/api/home` busca os rankings reais no [AniList](https://anilist.co) (API GraphQL pública, sem chave): `TRENDING_DESC` para "Em alta", `POPULARITY_DESC` filtrado pela temporada atual para "Populares da temporada", e `POPULARITY_DESC` geral para "Mais populares".
+
+Cada título do AniList é então casado contra uma busca ao vivo no Goyabu (única fonte com stream 100% funcional hoje) por similaridade de tokens no título; quando encontra um match confiável, o card vira clicável (`animeUrl`/`source` preenchidos) e leva direto pros episódios. Quando não encontra (comum pra lançamentos da temporada atual, que ainda não foram indexados pelos scrapers), o card aparece em cinza/desabilitado no frontend.
+
+Isso é caro (dezenas de buscas ao vivo por chamada), então o resultado fica em cache no backend por 1h (`homeCacheTTL` em `cmd/server/home.go`); a primeira chamada depois de reiniciar o servidor leva uns 15-20s.
 
 ## O que funciona hoje
 
