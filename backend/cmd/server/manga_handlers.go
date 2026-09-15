@@ -82,7 +82,7 @@ func handleMangaChapters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, chapters)
+	writeJSON(w, http.StatusOK, toChapterItems(chapters))
 }
 
 // handleChapterPages resolves a fresh MangaDex@Home CDN URL for this read —

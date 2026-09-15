@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -91,6 +93,11 @@ type mdChapter struct {
 		Chapter            string `json:"chapter"`
 		Title              string `json:"title"`
 		TranslatedLanguage string `json:"translatedLanguage"`
+		// ExternalURL is set when MangaDex only holds a link to another site
+		// (e.g. an official-but-since-pulled MangaPlus simulpub) rather than
+		// actual page images — happens a lot for currently-licensed titles.
+		// There's nothing for our reader to show for these.
+		ExternalURL string `json:"externalUrl"`
 	} `json:"attributes"`
 }
 
@@ -193,38 +200,99 @@ func searchMangaDex(ctx context.Context, query string, limit int) ([]MangaItem, 
 	if err := mangadexGet(ctx, "/manga", v, &resp); err != nil {
 		return nil, err
 	}
-	return toMangaItems(resp.Data), nil
+	items := toMangaItems(resp.Data)
+	rankMangaByRelevance(query, items)
+	return items, nil
 }
 
-// fetchMangaChapters lists a manga's Portuguese chapters in reading order.
-// Multiple scanlation groups often translate the same chapter; this keeps
-// only the first one MangaDex returns per chapter number rather than
-// showing duplicates.
-func fetchMangaChapters(ctx context.Context, mangaID string) ([]ChapterItem, error) {
-	v := url.Values{}
-	v.Add("translatedLanguage[]", "pt-br")
-	v.Add("order[chapter]", "asc")
-	v.Set("limit", "500")
+// rankMangaByRelevance re-sorts search results so the title someone actually
+// typed for outranks side stories/spinoffs/doujinshi that merely share
+// words with it. MangaDex's own title search ranks "Jujutsu Kaisen Modulo"
+// (a short side story) above the main "Jujutsu Kaisen" series for a query
+// of "Jujutsu Kaisen" — both match, but the exact/closer title should win.
+// Sorted in place; ties keep MangaDex's original relative order (stable).
+func rankMangaByRelevance(query string, items []MangaItem) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	score := func(title string) int {
+		t := strings.ToLower(strings.TrimSpace(title))
+		switch {
+		case t == q:
+			return 3
+		case strings.HasPrefix(t, q):
+			return 2
+		case strings.Contains(t, q):
+			return 1
+		default:
+			return 0
+		}
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		si, sj := score(items[i].Title), score(items[j].Title)
+		if si != sj {
+			return si > sj
+		}
+		// Among equally-relevant matches, the shorter title is more likely
+		// to be the main series rather than a "Series: Subtitle" spinoff.
+		return len(items[i].Title) < len(items[j].Title)
+	})
+}
 
-	var resp mdChapterListResponse
-	if err := mangadexGet(ctx, "/manga/"+mangaID+"/feed", v, &resp); err != nil {
-		return nil, err
+const mangaFeedPageSize = 500
+
+// fetchMangaChapters lists a manga's Portuguese chapters in reading order.
+// A single request can miss chapters on a title with many scanlation groups
+// (the feed contains one entry per group per chapter, and a hit series can
+// have hundreds of chapters times however many groups translated it — easily
+// past a 500-item single page), so this pages through with offset until a
+// short page signals the end. Two kinds of duplicates/noise get filtered:
+// multiple groups translating the same chapter number (keeps the first) and
+// externalUrl-only entries, which MangaDex uses as link-only stubs for
+// officially licensed chapters it isn't allowed to host — clicking one leads
+// nowhere in our reader (no page images exist for it), so it's dropped
+// rather than shown as a dead end.
+func fetchMangaChapters(ctx context.Context, mangaID string) ([]mdChapter, error) {
+	var all []mdChapter
+	for offset := 0; ; offset += mangaFeedPageSize {
+		v := url.Values{}
+		v.Add("translatedLanguage[]", "pt-br")
+		v.Add("order[chapter]", "asc")
+		v.Set("limit", strconv.Itoa(mangaFeedPageSize))
+		v.Set("offset", strconv.Itoa(offset))
+
+		var resp mdChapterListResponse
+		if err := mangadexGet(ctx, "/manga/"+mangaID+"/feed", v, &resp); err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Data...)
+
+		if len(resp.Data) < mangaFeedPageSize || offset+mangaFeedPageSize >= 10000 {
+			// MangaDex caps offset+limit at 10000 regardless; bail rather
+			// than loop forever on a pathological series.
+			break
+		}
 	}
 
-	seen := make(map[string]bool, len(resp.Data))
-	items := make([]ChapterItem, 0, len(resp.Data))
-	for _, c := range resp.Data {
+	seen := make(map[string]bool, len(all))
+	items := make([]mdChapter, 0, len(all))
+	for _, c := range all {
+		if c.Attributes.ExternalURL != "" {
+			continue
+		}
 		if seen[c.Attributes.Chapter] {
 			continue
 		}
 		seen[c.Attributes.Chapter] = true
-		items = append(items, ChapterItem{
-			ID:      c.ID,
-			Chapter: c.Attributes.Chapter,
-			Title:   c.Attributes.Title,
-		})
+		items = append(items, c)
 	}
 	return items, nil
+}
+
+func toChapterItems(chapters []mdChapter) []ChapterItem {
+	items := make([]ChapterItem, len(chapters))
+	for i, c := range chapters {
+		items[i] = ChapterItem{ID: c.ID, Chapter: c.Attributes.Chapter, Title: c.Attributes.Title}
+	}
+	return items
 }
 
 // resolveChapterPages asks MangaDex which CDN node to read this chapter's
