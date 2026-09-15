@@ -27,11 +27,10 @@ func registerRoutes(mux *http.ServeMux) {
 }
 
 // handleHome serves the trending/seasonal/all-time-popular rows for the
-// homepage (AniList rankings, matched to a playable Goyabu title where
-// possible — see home.go). A cold cache means dozens of live scrapes, so
-// this gets a generous timeout instead of the request's default context.
+// homepage (AniList rankings only — see home.go for why it doesn't try to
+// resolve a playable source up front).
 func handleHome(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
 	home, err := getHome(ctx)

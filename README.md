@@ -35,13 +35,13 @@ npm run dev
 - `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
 - `GET /api/home` — fileiras estilo Crunchyroll para a home (em alta / populares da temporada / mais populares), com pôster, banner, nota e link direto pro anime quando disponível. Ver "Home" abaixo.
 
-## Home (fileiras "em alta" / "populares")
+## Home (fileiras "em alta" / "populares", estilo Crunchyroll)
 
 O GoAnime (e os scrapers que ele usa) não tem nenhum dado próprio de popularidade — não sabemos quantas pessoas assistiram o quê. Pra ter fileiras tipo Crunchyroll, `/api/home` busca os rankings reais no [AniList](https://anilist.co) (API GraphQL pública, sem chave): `TRENDING_DESC` para "Em alta", `POPULARITY_DESC` filtrado pela temporada atual para "Populares da temporada", e `POPULARITY_DESC` geral para "Mais populares".
 
-Cada título do AniList é então casado contra uma busca ao vivo no Goyabu (única fonte com stream 100% funcional hoje) por similaridade de tokens no título; quando encontra um match confiável, o card vira clicável (`animeUrl`/`source` preenchidos) e leva direto pros episódios. Quando não encontra (comum pra lançamentos da temporada atual, que ainda não foram indexados pelos scrapers), o card aparece em cinza/desabilitado no frontend.
+A home **não** tenta casar cada título com uma fonte (Goyabu/SuperFlix/...) de antemão — isso exigiria dezenas de buscas ao vivo só pra carregar a tela inicial. Em vez disso `/api/home` devolve só metadados do AniList (título, pôster, banner, sinopse, nota, gêneros), o que é rápido (~1s, cacheado 1h). Clicar num card — ou no hero — dispara uma busca normal em `/api/search?q=<título>`, exatamente como digitar na busca, e o usuário escolhe entre os resultados das fontes igual ao fluxo de busca manual.
 
-Isso é caro (dezenas de buscas ao vivo por chamada), então o resultado fica em cache no backend por 1h (`homeCacheTTL` em `cmd/server/home.go`); a primeira chamada depois de reiniciar o servidor leva uns 15-20s.
+O hero (`HeroCarousel.tsx`) roda um carrossel com os 6 primeiros itens de "Em alta", com setas, indicadores e avanço automático a cada 7s.
 
 ## O que funciona hoje
 

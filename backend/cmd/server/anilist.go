@@ -6,10 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
 const anilistEndpoint = "https://graphql.anilist.co"
+
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTML(s string) string {
+	return strings.TrimSpace(htmlTagRe.ReplaceAllString(s, " "))
+}
 
 // anilistMedia is the subset of AniList's Media object we need for home-page
 // cards. AniList is used purely for real, global popularity rankings — our

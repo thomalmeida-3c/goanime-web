@@ -7,10 +7,13 @@ import (
 	"time"
 )
 
-// HomeItem is an AniList-ranked title, optionally linked to a playable
-// Goyabu anime when findGoyabuMatch found a confident match. AnimeURL/Source
-// are empty when no match was found — the frontend should show the card
-// without a play affordance in that case.
+// HomeItem is an AniList-ranked title. Unlike an earlier version of this
+// endpoint, it does NOT try to resolve a playable URL up front — that meant
+// dozens of live scrapes per home load (~20s cold) just to grey out the
+// titles our sources don't have. Instead the frontend sends the user
+// straight to /api/search?q=<title> on click, same as typing it in the
+// search bar; that's the one place we already know how to match a title to
+// a source, and it only runs for the one anime the user actually picked.
 type HomeItem struct {
 	AnilistID   int      `json:"anilistId"`
 	Title       string   `json:"title"`
@@ -19,8 +22,6 @@ type HomeItem struct {
 	Description string   `json:"description,omitempty"`
 	Score       int      `json:"score,omitempty"`
 	Genres      []string `json:"genres,omitempty"`
-	AnimeURL    string   `json:"animeUrl,omitempty"`
-	Source      string   `json:"source,omitempty"`
 }
 
 type HomeResponse struct {
@@ -103,9 +104,29 @@ func buildHome(ctx context.Context) (*HomeResponse, error) {
 	}
 
 	return &HomeResponse{
-		Trending:       matchAll(trending),
-		SeasonPopular:  matchAll(seasonPopular),
-		AllTimePopular: matchAll(allTimePopular),
+		Trending:       toHomeItems(trending),
+		SeasonPopular:  toHomeItems(seasonPopular),
+		AllTimePopular: toHomeItems(allTimePopular),
 		GeneratedAt:    time.Now(),
 	}, nil
+}
+
+func toHomeItems(media []anilistMedia) []HomeItem {
+	items := make([]HomeItem, len(media))
+	for i, m := range media {
+		title := m.Title.Romaji
+		if title == "" {
+			title = m.Title.English
+		}
+		items[i] = HomeItem{
+			AnilistID:   m.ID,
+			Title:       title,
+			ImageURL:    m.CoverImage.Large,
+			BannerURL:   m.BannerImage,
+			Description: stripHTML(m.Description),
+			Score:       m.AverageScore,
+			Genres:      m.Genres,
+		}
+	}
+	return items
 }

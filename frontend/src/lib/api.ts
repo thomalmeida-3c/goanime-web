@@ -67,8 +67,6 @@ export type HomeItem = {
   description?: string;
   score?: number;
   genres?: string[];
-  animeUrl?: string;
-  source?: string;
 };
 
 export type HomeResponse = {
