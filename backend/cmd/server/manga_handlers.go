@@ -27,33 +27,33 @@ func registerMangaRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/manga/pages", handleChapterPages)
 }
 
-// fanMangaLivre runs the mangalivre.to and mangalivre.blog fetchers for one
-// listing in parallel and merges what comes back — same idea as /api/search
-// fanning anime sources out. Neither failing the other: an error from one
-// source just means fewer results, not a broken request (mirrors how the
-// anime search already tolerates a source being down).
-func fanMangaLivre(
-	toFn func(context.Context, int) ([]MangaItem, error),
-	blogFn func(context.Context, int) ([]MangaItem, error),
+// fanMangaSources runs any number of source fetchers for one listing in
+// parallel and merges what comes back — same idea as /api/search fanning
+// anime sources out. One source erroring doesn't drop the others: a failure
+// just means fewer results, not a broken request (mirrors how the anime
+// search already tolerates a source being down).
+func fanMangaSources(
 	ctx context.Context,
 	limit int,
+	fetchers ...func(context.Context, int) ([]MangaItem, error),
 ) []MangaItem {
+	results := make([][]MangaItem, len(fetchers))
 	var wg sync.WaitGroup
-	var to, blog []MangaItem
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		to, _ = toFn(ctx, limit)
-	}()
-	go func() {
-		defer wg.Done()
-		blog, _ = blogFn(ctx, limit)
-	}()
+	wg.Add(len(fetchers))
+	for i, fn := range fetchers {
+		i, fn := i, fn
+		go func() {
+			defer wg.Done()
+			items, _ := fn(ctx, limit)
+			results[i] = items
+		}()
+	}
 	wg.Wait()
 
-	merged := make([]MangaItem, 0, len(to)+len(blog))
-	merged = append(merged, to...)
-	merged = append(merged, blog...)
+	merged := make([]MangaItem, 0, limit*len(fetchers))
+	for _, r := range results {
+		merged = append(merged, r...)
+	}
 	return merged
 }
 
@@ -72,7 +72,7 @@ func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items := fanMangaLivre(fetchMangaLivreLatest, fetchMangaLivreBlogLatest, ctx, 12)
+	items := fanMangaSources(ctx, 12, fetchMangaLivreLatest, fetchMangaLivreBlogLatest, fetchMangaMillionLatest)
 
 	mangaLatestCacheMu.Lock()
 	mangaLatestCache = items
@@ -86,8 +86,9 @@ func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
 // same reasoning: cheap to cache, no reason to hit the source on every
 // load. MangaDex support (mangadex.go) is still here and working, just not
 // wired into the listing right now — that one stayed out deliberately (see
-// README "MangaDex"); mangalivre.to and mangalivre.blog are both real,
-// working sources with different catalogs, so both are fanned out here.
+// README "MangaDex"); mangalivre.to, mangalivre.blog and MangaMillion are
+// all real, working sources with different catalogs, so all three are
+// fanned out here.
 func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	mangaHomeCacheMu.Lock()
 	if mangaHomeCache != nil && time.Since(mangaHomeCacheAt) < mangaHomeCacheTTL {
@@ -101,7 +102,7 @@ func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items := fanMangaLivre(fetchMangaLivrePopular, fetchMangaLivreBlogPopular, ctx, 12)
+	items := fanMangaSources(ctx, 12, fetchMangaLivrePopular, fetchMangaLivreBlogPopular, fetchMangaMillionPopular)
 
 	mangaHomeCacheMu.Lock()
 	mangaHomeCache = items
@@ -124,10 +125,10 @@ func handleMangaSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items := fanMangaLivre(
+	items := fanMangaSources(ctx, 24,
 		func(ctx context.Context, limit int) ([]MangaItem, error) { return searchMangaLivre(ctx, q, limit) },
 		func(ctx context.Context, limit int) ([]MangaItem, error) { return searchMangaLivreBlog(ctx, q, limit) },
-		ctx, 24,
+		func(ctx context.Context, limit int) ([]MangaItem, error) { return searchMangaMillion(ctx, q, limit) },
 	)
 
 	rankMangaByRelevance(q, items)

@@ -243,6 +243,16 @@ export default function Home() {
   // handleSelectHomeItem, this goes straight to the chapter list instead of
   // routing through a search.
   async function handleSelectManga(manga: MangaItem) {
+    // MangaMillion is Shueisha's own official platform, not a fan
+    // aggregator — its catalog is public but reading a chapter needs an
+    // access token their JS mints client-side with no exposed API, so we
+    // don't have a chapters/reader flow for it. Send the reader straight to
+    // the source instead of pretending we can open it in-app.
+    if (manga.source === "MangaMillion") {
+      window.open(manga.id, "_blank", "noopener,noreferrer");
+      return;
+    }
+
     setSelectedManga(manga);
     setMangaProgress(null);
     setLoading(true);
