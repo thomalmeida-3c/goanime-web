@@ -34,6 +34,13 @@ npm run dev
 - `GET /api/stream?episodeUrl=<url>&source=<Source>&quality=best&mode=sub` — resolve a URL de stream e devolve `playbackUrl` (um endpoint local, `/api/proxy/:id`, que faz o proxy do vídeo já com os headers/token que o provedor exige).
 - `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
 - `GET /api/home` — fileiras estilo Crunchyroll para a home (em alta / populares da temporada / mais populares), com pôster, banner, nota e link direto pro anime quando disponível. Ver "Home" abaixo.
+- `GET /api/skip?animeName=<>&animeUrl=<>&episodeNum=<>` — tempos de abertura/encerramento (AniSkip), pra o botão "Pular abertura". Best-effort: sem match no AniList ou sem dado no AniSkip, devolve `{"op":null,"ed":null}` em vez de erro.
+
+## Pular abertura/encerramento (AniSkip)
+
+Igual ao CLI, mas via HTTP: nenhuma das nossas fontes (Goyabu/SuperFlix/...) expõe o ID do MyAnimeList, que é a chave que a API do [AniSkip](https://aniskip.com) usa. Então `/api/skip` primeiro resolve o MAL id fazendo a mesma busca por título no AniList que o CLI já fazia (`internal/api.enrichAnimeData`, exportada como `EnrichAnimeMetadata` em `export_web.go`), e só então consulta o AniSkip.
+
+O frontend dispara essa busca em paralelo com a resolução do stream (não bloqueia o play — o botão "Pular abertura ⏭" só aparece quando/se os dados chegam, e some quando o `currentTime` sai do intervalo). Testado com Kimetsu no Yaiba: pulou de 1:14 direto pra 2:33, batendo com os timestamps reais do AniSkip.
 
 ## Home (fileiras "em alta" / "populares", estilo Crunchyroll)
 

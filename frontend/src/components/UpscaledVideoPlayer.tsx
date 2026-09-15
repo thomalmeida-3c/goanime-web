@@ -8,6 +8,9 @@ import {
   type UpscalePipeline,
 } from "@/lib/upscaleGL";
 
+type SkipInterval = { start: number; end: number };
+export type SkipTimes = { op: SkipInterval | null; ed: SkipInterval | null };
+
 function formatTime(seconds: number): string {
   if (!isFinite(seconds)) return "0:00";
   const m = Math.floor(seconds / 60);
@@ -27,7 +30,13 @@ type VideoWithVFC = HTMLVideoElement & {
 // actual decode/audio source) but invisible — which means native controls
 // disappear with it, so this ships its own play/seek/mute/fullscreen bar.
 // Falls back to a plain <video controls> when WebGL2 isn't available.
-export default function UpscaledVideoPlayer({ src }: { src: string }) {
+export default function UpscaledVideoPlayer({
+  src,
+  skipTimes,
+}: {
+  src: string;
+  skipTimes?: SkipTimes | null;
+}) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -152,6 +161,22 @@ export default function UpscaledVideoPlayer({ src }: { src: string }) {
     setMuted(video.muted);
   }
 
+  function skipTo(end: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = end;
+    setCurrentTime(end);
+  }
+
+  // Like the CLI's mpv skip button: whichever interval (opening or ending)
+  // the playhead currently sits inside, if any.
+  const activeSkip =
+    skipTimes?.op && currentTime >= skipTimes.op.start && currentTime < skipTimes.op.end
+      ? { label: "Pular abertura", end: skipTimes.op.end }
+      : skipTimes?.ed && currentTime >= skipTimes.ed.start && currentTime < skipTimes.ed.end
+        ? { label: "Pular encerramento", end: skipTimes.ed.end }
+        : null;
+
   function toggleFullscreen() {
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
@@ -188,6 +213,15 @@ export default function UpscaledVideoPlayer({ src }: { src: string }) {
         <div className="absolute inset-0 flex items-center justify-center bg-black/30">
           <div className="h-10 w-10 animate-spin rounded-full border-2 border-white/30 border-t-white" />
         </div>
+      )}
+
+      {activeSkip && (
+        <button
+          onClick={() => skipTo(activeSkip.end)}
+          className="absolute bottom-16 right-4 rounded-md bg-white/90 px-4 py-2 text-sm font-semibold text-black shadow-lg transition hover:bg-white"
+        >
+          {activeSkip.label} ⏭
+        </button>
       )}
 
       <div className="absolute inset-x-0 bottom-0 flex flex-col gap-1.5 bg-gradient-to-t from-black/90 to-transparent px-4 pb-3 pt-8">

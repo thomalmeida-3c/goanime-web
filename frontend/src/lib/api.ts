@@ -108,6 +108,24 @@ export function getHome(): Promise<HomeResponse> {
   return request<HomeResponse>("/api/home", {});
 }
 
+export type SkipInterval = { start: number; end: number };
+export type SkipTimesResponse = { op: SkipInterval | null; ed: SkipInterval | null };
+
+// getSkipTimes resolves AniSkip's opening/ending timestamps for one episode
+// (best-effort: comes back {op: null, ed: null} rather than an error when
+// the title or episode has no data, not just on a hard failure).
+export function getSkipTimes(
+  animeName: string,
+  animeUrl: string,
+  episodeNum: number,
+): Promise<SkipTimesResponse> {
+  return request<SkipTimesResponse>("/api/skip", {
+    animeName,
+    animeUrl,
+    episodeNum: String(episodeNum),
+  });
+}
+
 export function playbackUrl(path: string): string {
   return API_BASE + path;
 }

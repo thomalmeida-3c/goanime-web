@@ -9,8 +9,10 @@ import {
   type Episode,
   type HomeItem,
   type HomeResponse,
+  type SkipTimesResponse,
   getEpisodes,
   getHome,
+  getSkipTimes,
   getStream,
   playbackUrl,
   searchAnime,
@@ -25,6 +27,7 @@ export default function Home() {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [skipTimes, setSkipTimes] = useState<SkipTimesResponse | null>(null);
   const [view, setView] = useState<View>("home");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +94,16 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setVideoSrc(null);
+    setSkipTimes(null);
+
+    // Best-effort and off the critical path: AniSkip needs a MAL id lookup
+    // first (our sources never expose one), which can take a few seconds —
+    // the episode plays immediately either way, the skip button just shows
+    // up a beat later once/if this resolves.
+    getSkipTimes(selectedAnime.Name, selectedAnime.URL, episode.Num)
+      .then(setSkipTimes)
+      .catch(() => {});
+
     try {
       const stream = await getStream(episode.URL, selectedAnime.Source);
       setVideoSrc(playbackUrl(stream.playbackUrl));
@@ -287,7 +300,9 @@ export default function Home() {
                 {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
                 {loading && <p className="text-sm text-neutral-400">Resolvendo stream...</p>}
 
-                {videoSrc && <UpscaledVideoPlayer key={videoSrc} src={videoSrc} />}
+                {videoSrc && (
+                  <UpscaledVideoPlayer key={videoSrc} src={videoSrc} skipTimes={skipTimes} />
+                )}
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <button
