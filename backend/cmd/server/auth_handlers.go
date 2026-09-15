@@ -30,6 +30,9 @@ func registerAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/library", handleGetLibrary)
 	mux.HandleFunc("POST /api/library", handlePostLibrary)
 	mux.HandleFunc("DELETE /api/library", handleDeleteLibrary)
+	mux.HandleFunc("GET /api/manga/progress", handleGetProgress)
+	mux.HandleFunc("POST /api/manga/progress", handlePostProgress)
+	mux.HandleFunc("GET /api/manga/progress/all", handleListProgress)
 }
 
 var emailRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
@@ -116,4 +119,65 @@ func handleDeleteLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleGetProgress always returns 200 — {"found": false} isn't an error,
+// it just means the user hasn't opened a chapter of this manga yet (same
+// "empty state, not a failure" pattern as /api/products' {connected:false}).
+func handleGetProgress(w http.ResponseWriter, r *http.Request) {
+	email := normalizeEmail(r.URL.Query().Get("email"))
+	source := r.URL.Query().Get("source")
+	mangaID := r.URL.Query().Get("mangaId")
+	if email == "" || source == "" || mangaID == "" {
+		writeError(w, http.StatusBadRequest, errProgressInvalid)
+		return
+	}
+
+	p, found := users.getProgress(email, source, mangaID)
+	writeJSON(w, http.StatusOK, struct {
+		Found bool `json:"found"`
+		ChapterProgress
+	}{Found: found, ChapterProgress: p})
+}
+
+func handlePostProgress(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Email     string `json:"email"`
+		Source    string `json:"source"`
+		MangaID   string `json:"mangaId"`
+		ChapterID string `json:"chapterId"`
+		Chapter   string `json:"chapter"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	email := normalizeEmail(body.Email)
+	if email == "" || body.Source == "" || body.MangaID == "" || body.ChapterID == "" {
+		writeError(w, http.StatusBadRequest, errProgressInvalid)
+		return
+	}
+
+	if err := users.setProgress(email, body.Source, body.MangaID, body.ChapterID, body.Chapter); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleListProgress powers the profile page: one call instead of one
+// /api/manga/progress per saved manga.
+func handleListProgress(w http.ResponseWriter, r *http.Request) {
+	email := normalizeEmail(r.URL.Query().Get("email"))
+	if email == "" {
+		writeError(w, http.StatusBadRequest, errEmailRequired)
+		return
+	}
+
+	m, err := users.listProgress(email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, m)
 }

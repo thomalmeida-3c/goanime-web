@@ -10,6 +10,7 @@ import MangaReader from "@/components/MangaReader";
 import MangaRow from "@/components/MangaRow";
 import MangasPage from "@/components/MangasPage";
 import ProdutosPage from "@/components/ProdutosPage";
+import ProfilePage from "@/components/ProfilePage";
 import RelatedProducts from "@/components/RelatedProducts";
 import Sidebar, { type NavView } from "@/components/Sidebar";
 import TopBar from "@/components/TopBar";
@@ -17,6 +18,7 @@ import UpscaledVideoPlayer from "@/components/UpscaledVideoPlayer";
 import {
   type Anime,
   type ChapterItem,
+  type ChapterProgress,
   type Episode,
   type HomeItem,
   type HomeResponse,
@@ -24,6 +26,7 @@ import {
   type MangaItem,
   type SkipTimesResponse,
   addToLibrary,
+  getAllMangaProgress,
   getChapterPages,
   getEpisodes,
   getHome,
@@ -31,10 +34,12 @@ import {
   getMangaChapters,
   getMangaHome,
   getMangaLatest,
+  getMangaProgress,
   getSkipTimes,
   getStream,
   playbackUrl,
   removeFromLibrary,
+  saveMangaProgress,
   searchAnime,
   searchManga,
 } from "@/lib/api";
@@ -48,8 +53,24 @@ type View =
   | "episodes"
   | "player"
   | "manga-chapters"
-  | "manga-reader";
+  | "manga-reader"
+  | "profile";
 type ContentFilter = "all" | "anime" | "manga";
+
+// Chapter numbers aren't always plain integers (e.g. "108.100" for a split
+// release) — parseFloat handles the common cases; anything unparseable
+// (extras/specials labeled with text) sorts to the front rather than
+// crashing the comparator.
+function chapterNum(ch: ChapterItem): number {
+  const n = parseFloat(ch.chapter);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+function sortChapters(chapters: ChapterItem[], ascending: boolean): ChapterItem[] {
+  return [...chapters].sort((a, b) =>
+    ascending ? chapterNum(a) - chapterNum(b) : chapterNum(b) - chapterNum(a),
+  );
+}
 
 const EMAIL_STORAGE_KEY = "goanime:email";
 
@@ -64,6 +85,8 @@ export default function Home() {
   const [skipTimes, setSkipTimes] = useState<SkipTimesResponse | null>(null);
   const [selectedManga, setSelectedManga] = useState<MangaItem | null>(null);
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
+  const [chapterSortAsc, setChapterSortAsc] = useState(true);
+  const [mangaProgress, setMangaProgress] = useState<ChapterProgress | null>(null);
   const [selectedChapter, setSelectedChapter] = useState<ChapterItem | null>(null);
   const [chapterPages, setChapterPages] = useState<string[]>([]);
   const [view, setView] = useState<View>("home");
@@ -77,7 +100,19 @@ export default function Home() {
 
   const [email, setEmail] = useState<string | null>(null);
   const [library, setLibrary] = useState<LibraryItem[]>([]);
+  const [libraryProgress, setLibraryProgress] = useState<Record<string, ChapterProgress>>({});
   const [showLogin, setShowLogin] = useState(false);
+
+  // Shared by the initial-mount restore and a fresh login — both need the
+  // same pair of fetches (saved library + per-manga "where you stopped").
+  function loadLibrary(forEmail: string) {
+    getLibrary(forEmail)
+      .then(setLibrary)
+      .catch(() => {});
+    getAllMangaProgress(forEmail)
+      .then(setLibraryProgress)
+      .catch(() => {});
+  }
 
   useEffect(() => {
     getHome()
@@ -93,9 +128,7 @@ export default function Home() {
     const savedEmail = localStorage.getItem(EMAIL_STORAGE_KEY);
     if (savedEmail) {
       setEmail(savedEmail);
-      getLibrary(savedEmail)
-        .then(setLibrary)
-        .catch(() => {});
+      loadLibrary(savedEmail);
     }
   }, []);
 
@@ -103,9 +136,15 @@ export default function Home() {
     setEmail(newEmail);
     localStorage.setItem(EMAIL_STORAGE_KEY, newEmail);
     setShowLogin(false);
-    getLibrary(newEmail)
-      .then(setLibrary)
-      .catch(() => {});
+    loadLibrary(newEmail);
+  }
+
+  function handleLogout() {
+    setEmail(null);
+    setLibrary([]);
+    setLibraryProgress({});
+    localStorage.removeItem(EMAIL_STORAGE_KEY);
+    setView("home");
   }
 
   function isSaved(kind: "anime" | "manga", refId: string) {
@@ -205,6 +244,7 @@ export default function Home() {
   // routing through a search.
   async function handleSelectManga(manga: MangaItem) {
     setSelectedManga(manga);
+    setMangaProgress(null);
     setLoading(true);
     setError(null);
     try {
@@ -215,6 +255,32 @@ export default function Home() {
       setError(err instanceof Error ? err.message : "Falha ao carregar capítulos");
     } finally {
       setLoading(false);
+    }
+    if (email) {
+      getMangaProgress(email, manga.source, manga.id)
+        .then((p) => setMangaProgress(p.found ? p : null))
+        .catch(() => {});
+    }
+  }
+
+  // Opens a saved library item from the profile page. A LibraryItem carries
+  // just enough (refId/source/title/imageUrl) to re-enter either flow
+  // directly — episodes/chapters don't need a search step, the same way a
+  // home-row click does.
+  function openLibraryItem(item: LibraryItem) {
+    if (item.kind === "manga") {
+      handleSelectManga({ id: item.refId, title: item.title, coverUrl: item.imageUrl, source: item.source });
+    } else {
+      handleSelectAnime({
+        Name: item.title,
+        URL: item.refId,
+        ImageURL: item.imageUrl ?? "",
+        Episodes: null,
+        AnilistID: 0,
+        MalID: 0,
+        Source: item.source,
+        Details: null,
+      });
     }
   }
 
@@ -233,6 +299,14 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+    // Best-effort, doesn't block reading: "where you stopped" is whatever
+    // chapter was last opened, logged-in only.
+    if (email) {
+      saveMangaProgress(email, selectedManga.source, selectedManga.id, chapter.id, chapter.chapter).catch(
+        () => {},
+      );
+      setMangaProgress({ found: true, chapterId: chapter.id, chapter: chapter.chapter });
+    }
   }
 
   function goHome() {
@@ -244,6 +318,7 @@ export default function Home() {
     setEpisodes([]);
     setSelectedManga(null);
     setChapters([]);
+    setMangaProgress(null);
     setError(null);
   }
 
@@ -255,6 +330,7 @@ export default function Home() {
     setEpisodes([]);
     setSelectedManga(null);
     setChapters([]);
+    setMangaProgress(null);
     setError(null);
     setView(navView);
   }
@@ -265,6 +341,7 @@ export default function Home() {
     setEpisodes([]);
     setSelectedManga(null);
     setChapters([]);
+    setMangaProgress(null);
   }
 
   function backToEpisodes() {
@@ -294,18 +371,23 @@ export default function Home() {
     ? (view as NavView)
     : "home";
 
+  const isMangaReader = view === "manga-reader";
+
   return (
     <div className="flex min-h-screen bg-neutral-950 text-neutral-100">
       <Sidebar active={activeNav} onNavigate={handleNavigate} />
 
-      <div className="min-w-0 flex-1">
-        <TopBar
-          email={email}
-          onSelectAnime={handleSelectAnime}
-          onSelectManga={handleSelectManga}
-          onSubmitSearch={runSearch}
-          onOpenLogin={() => setShowLogin(true)}
-        />
+      <div className={`min-w-0 flex-1 ${isMangaReader ? "" : "pb-16 sm:pb-0"}`}>
+        <div className={isMangaReader ? "hidden sm:block" : ""}>
+          <TopBar
+            email={email}
+            onSelectAnime={handleSelectAnime}
+            onSelectManga={handleSelectManga}
+            onSubmitSearch={runSearch}
+            onOpenLogin={() => setShowLogin(true)}
+            onOpenProfile={() => setView("profile")}
+          />
+        </div>
 
         {showLogin && (
           <LoginModal onClose={() => setShowLogin(false)} onLoggedIn={handleLoggedIn} />
@@ -348,6 +430,17 @@ export default function Home() {
         )}
 
         {view === "produtos" && <ProdutosPage />}
+
+        {view === "profile" && email && (
+          <ProfilePage
+            email={email}
+            library={library}
+            progress={libraryProgress}
+            onSelectItem={openLibraryItem}
+            onRemoveItem={toggleSave}
+            onLogout={handleLogout}
+          />
+        )}
 
         {view === "search" && (
           <div className="px-4 py-6 sm:px-6">
@@ -565,8 +658,12 @@ export default function Home() {
               coverUrl={selectedManga.coverUrl}
               badges={[selectedManga.source, ...(selectedManga.tags ?? [])]}
               description={selectedManga.description}
-              actionLabel="Ler"
-              onAction={() => chapters[0] && handleSelectChapter(chapters[0])}
+              actionLabel={mangaProgress ? `Continuar — Cap. ${mangaProgress.chapter}` : "Ler"}
+              onAction={() => {
+                const target =
+                  chapters.find((c) => c.id === mangaProgress?.chapterId) ?? chapters[0];
+                if (target) handleSelectChapter(target);
+              }}
               saved={isSaved("manga", selectedManga.id)}
               onToggleSave={() =>
                 toggleSave({
@@ -589,38 +686,63 @@ export default function Home() {
             )}
 
             {chapters.length > 0 && (
-              <h2 className="mb-3 text-sm font-semibold text-neutral-300">Capítulos</h2>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-neutral-300">Capítulos</h2>
+                <button
+                  onClick={() => setChapterSortAsc((asc) => !asc)}
+                  className="rounded-md border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-300 hover:border-purple-500 hover:text-purple-300"
+                >
+                  {chapterSortAsc ? "↑ Menor primeiro" : "↓ Maior primeiro"}
+                </button>
+              </div>
             )}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-              {chapters.map((ch) => (
-                <button
-                  key={ch.id}
-                  onClick={() => handleSelectChapter(ch)}
-                  className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-left text-sm hover:border-neutral-600"
-                >
-                  Cap. {ch.chapter}
-                  {ch.title ? ` — ${ch.title}` : ""}
-                </button>
-              ))}
+              {sortChapters(chapters, chapterSortAsc).map((ch) => {
+                const isLastRead = ch.id === mangaProgress?.chapterId;
+                return (
+                  <button
+                    key={ch.id}
+                    onClick={() => handleSelectChapter(ch)}
+                    className={`rounded-md border px-4 py-2 text-left text-sm ${
+                      isLastRead
+                        ? "border-purple-500 bg-purple-950/40 text-purple-200"
+                        : "border-neutral-800 bg-neutral-900 hover:border-neutral-600"
+                    }`}
+                  >
+                    Cap. {ch.chapter}
+                    {ch.title ? ` — ${ch.title}` : ""}
+                    {isLastRead && <span className="ml-1.5 text-xs text-purple-400">●</span>}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
 
         {view === "manga-reader" && selectedManga && selectedChapter && (
-          <div className="px-4 py-6 sm:px-6">
-            <div className="mb-4 flex items-center justify-between">
-              <button onClick={backToChapters} className="text-sm text-neutral-400 hover:text-neutral-200">
-                ← Voltar para capítulos
+          <div className="flex h-[calc(100dvh-4rem)] flex-col px-0 py-0 sm:h-auto sm:px-6 sm:py-6">
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2 sm:mb-4 sm:border-0 sm:px-0 sm:py-0">
+              <button
+                onClick={backToChapters}
+                className="shrink-0 text-sm text-neutral-400 hover:text-neutral-200"
+              >
+                ← <span className="hidden sm:inline">Voltar para capítulos</span>
               </button>
-              <h2 className="text-sm font-semibold text-neutral-300">
+              <h2 className="truncate text-xs font-semibold text-neutral-300 sm:text-sm">
                 {selectedManga.title} — Cap. {selectedChapter.chapter}
               </h2>
             </div>
 
-            {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
-            {loading && <p className="text-sm text-neutral-400">Carregando páginas...</p>}
+            {error && <p className="shrink-0 px-3 py-2 text-sm text-red-400 sm:px-0">{error}</p>}
+            {loading && (
+              <p className="shrink-0 px-3 py-2 text-sm text-neutral-400 sm:px-0">Carregando páginas...</p>
+            )}
 
-            {!loading && <MangaReader pages={chapterPages} />}
+            {!loading && (
+              <div className="min-h-0 flex-1">
+                <MangaReader pages={chapterPages} />
+              </div>
+            )}
           </div>
         )}
         </main>

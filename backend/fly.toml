@@ -1,0 +1,26 @@
+# Fly.io app config. App name is placeholder — pick a globally unique one
+# when running `fly launch`/`fly apps create` (see backend/DEPLOY.md).
+app = "goanime-web-backend"
+primary_region = "gru" # São Paulo — closest region to Brazil
+
+[build]
+
+[env]
+  ADDR = ":8080"
+  DATA_DIR = "/data"
+
+[[mounts]]
+  source = "goanime_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

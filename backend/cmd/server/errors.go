@@ -14,4 +14,5 @@ var (
 	errEmailRequired                  = errors.New("query parameter 'email' is required")
 	errLibraryItemInvalid             = errors.New("'email', 'item.kind' and 'item.refId' (or 'kind'/'refId' for delete) are required")
 	errMLNotConfigured                = errors.New("ML_CLIENT_ID, ML_CLIENT_SECRET and ML_REDIRECT_URI must be set first")
+	errProgressInvalid                = errors.New("'email', 'source' and 'mangaId' are required")
 )

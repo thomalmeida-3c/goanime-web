@@ -81,10 +81,10 @@ export default function DetailHeader({
             <p className="mb-4 line-clamp-3 max-w-2xl text-sm text-neutral-300">{description}</p>
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
             <button
               onClick={onAction}
-              className="rounded-md bg-purple-600 px-5 py-2 text-sm font-semibold text-white hover:bg-purple-500"
+              className="w-full rounded-md bg-purple-600 px-5 py-3 text-sm font-semibold text-white hover:bg-purple-500 active:bg-purple-700 sm:w-auto sm:py-2"
             >
               ▶ {actionLabel}
             </button>
@@ -93,7 +93,7 @@ export default function DetailHeader({
                 onClick={onToggleSave}
                 aria-label={saved ? "Remover da biblioteca" : "Salvar"}
                 title={saved ? "Remover da biblioteca" : "Salvar"}
-                className="flex items-center justify-center rounded-md border border-neutral-600 p-2.5 text-white transition hover:border-purple-500"
+                className="flex items-center justify-center self-start rounded-md border border-neutral-600 p-3 text-white transition hover:border-purple-500 active:bg-white/5 sm:self-auto sm:p-2.5"
               >
                 {saved ? (
                   <BookmarkCheck size={18} className="text-purple-400" />

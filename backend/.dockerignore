@@ -1,0 +1,9 @@
+data/
+*.exe
+main
+goanime
+goanime-test
+goanime-server
+server
+.git
+.idea

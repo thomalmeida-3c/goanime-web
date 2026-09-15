@@ -172,6 +172,37 @@ export function getMangaLatest(): Promise<{ latest: MangaItem[] }> {
   return request("/api/manga/latest", {});
 }
 
+// --- Progresso de leitura ---------------------------------------------------
+// "Onde você parou" por obra — o último capítulo aberto, não uma posição de
+// página. Salvo automaticamente ao abrir um capítulo; sem login, é no-op.
+
+export type ChapterProgress = { found: boolean; chapterId: string; chapter: string; updatedAt?: string };
+
+export function getMangaProgress(email: string, source: string, mangaId: string): Promise<ChapterProgress> {
+  return request<ChapterProgress>("/api/manga/progress", { email, source, mangaId });
+}
+
+// Keyed "source|mangaId" — matches every saved manga to its progress (if
+// any) without one request per library item, for the profile page.
+export function getAllMangaProgress(email: string): Promise<Record<string, ChapterProgress>> {
+  return request<Record<string, ChapterProgress>>("/api/manga/progress/all", { email });
+}
+
+export function saveMangaProgress(
+  email: string,
+  source: string,
+  mangaId: string,
+  chapterId: string,
+  chapter: string,
+): Promise<{ ok: boolean }> {
+  return requestJSON<{ ok: boolean }>(
+    "/api/manga/progress",
+    "POST",
+    {},
+    { email, source, mangaId, chapterId, chapter },
+  );
+}
+
 async function requestJSON<T>(
   path: string,
   method: "POST" | "DELETE",

@@ -10,12 +10,14 @@ export default function TopBar({
   onSelectManga,
   onSubmitSearch,
   onOpenLogin,
+  onOpenProfile,
 }: {
   email: string | null;
   onSelectAnime: (anime: Anime) => void;
   onSelectManga: (manga: MangaItem) => void;
   onSubmitSearch: (query: string) => void;
   onOpenLogin: () => void;
+  onOpenProfile: () => void;
 }) {
   return (
     <header className="sticky top-0 z-10 flex items-center gap-4 border-b border-neutral-800 bg-neutral-950/90 px-4 py-3 backdrop-blur sm:px-6">
@@ -26,7 +28,8 @@ export default function TopBar({
       />
       <span className="flex-1" />
       <button
-        onClick={onOpenLogin}
+        onClick={email ? onOpenProfile : onOpenLogin}
+        aria-label={email ? "Perfil" : "Entrar"}
         className="flex items-center gap-2 rounded-full border border-neutral-700 px-3 py-1.5 text-sm text-neutral-300 hover:border-purple-500 hover:text-white"
       >
         <User size={16} />

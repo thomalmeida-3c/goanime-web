@@ -19,27 +19,27 @@ export default function Sidebar({
   onNavigate: (view: NavView) => void;
 }) {
   return (
-    <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col gap-1 border-r border-neutral-800 bg-neutral-950 px-2 py-4 sm:w-56 sm:px-3">
+    <aside className="fixed inset-x-0 bottom-0 z-30 flex h-16 flex-row items-center justify-around gap-1 border-t border-neutral-800 bg-neutral-950 px-1 sm:sticky sm:inset-x-auto sm:top-0 sm:h-screen sm:w-56 sm:shrink-0 sm:flex-col sm:items-stretch sm:justify-start sm:gap-1 sm:border-t-0 sm:border-r sm:px-3 sm:py-4">
       <button
         onClick={() => onNavigate("home")}
-        className="mb-6 flex items-center justify-center gap-2 px-2 py-2 text-lg font-bold tracking-tight text-purple-400 sm:justify-start"
+        className="hidden items-center gap-2 px-2 py-2 text-lg font-bold tracking-tight text-purple-400 sm:mb-6 sm:flex"
       >
         <span className="text-xl">N</span>
-        <span className="hidden sm:inline">nomad</span>
+        <span>nomad</span>
       </button>
 
       {items.map((item) => (
         <button
           key={item.view}
           onClick={() => onNavigate(item.view)}
-          className={`flex items-center justify-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition sm:justify-start ${
+          className={`flex flex-1 flex-col items-center justify-center gap-0.5 rounded-md px-2 py-1.5 text-[10px] font-medium transition sm:flex-none sm:flex-row sm:justify-start sm:gap-3 sm:px-3 sm:py-2.5 sm:text-sm ${
             active === item.view
               ? "bg-purple-600 text-white"
               : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
           }`}
         >
           {item.icon}
-          <span className="hidden sm:inline">{item.label}</span>
+          <span>{item.label}</span>
         </button>
       ))}
     </aside>

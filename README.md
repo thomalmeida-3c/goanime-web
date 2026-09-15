@@ -27,6 +27,13 @@ npm run dev
 # abre em http://localhost:3000
 ```
 
+## Deploy (produção)
+
+Frontend no Vercel, backend no Fly.io — não dá pra hospedar o backend em
+algo serverless (persistência em arquivo, singleton de stream em memória,
+streaming de vídeo de longa duração exigem um processo Go persistente com
+disco de verdade). Passo a passo em `backend/DEPLOY.md` e `frontend/DEPLOY.md`.
+
 ## Endpoints do backend
 
 - `GET /api/search?q=<nome>` — busca em todas as fontes (AnimeFire, Goyabu, SuperFlix, AniDB).
@@ -37,6 +44,7 @@ npm run dev
 - `GET /api/skip?animeName=<>&animeUrl=<>&episodeNum=<>` — tempos de abertura/encerramento (AniSkip), pra o botão "Pular abertura". Best-effort: sem match no AniList ou sem dado no AniSkip, devolve `{"op":null,"ed":null}` em vez de erro.
 - `GET /api/manga/home` — mangás populares (MangaLivre). `GET /api/manga/latest` — mangás recém-adicionados (MangaLivre), pra fileira da página dedicada de Mangás. `GET /api/manga/search?q=` — busca. `GET /api/manga/chapters?id=<>&source=<>` — lista de capítulos. `GET /api/manga/pages?id=<>&source=<>` — resolve as URLs das páginas pro leitor. Ver "Mangás" abaixo.
 - `POST /api/auth/login` `{email}` — login sem senha (cria o usuário se não existir). `GET /api/library?email=` — lista a biblioteca salva. `POST /api/library` `{email, item}` — salva um anime/mangá. `DELETE /api/library?email=&kind=&refId=` — remove. Ver "Login e biblioteca" abaixo.
+- `GET /api/manga/progress?email=&source=&mangaId=` — último capítulo aberto de um mangá (`{found, chapterId, chapter}`). `POST /api/manga/progress` `{email, source, mangaId, chapterId, chapter}` — salva. `GET /api/manga/progress/all?email=` — todo o progresso do usuário de uma vez, keyed `"source|mangaId"` (usado pelo mini perfil). Ver "Progresso de leitura" abaixo.
 - `GET /api/products?q=<termo>` — busca produtos reais no Mercado Livre (precisa de OAuth conectado, ver "Produtos" abaixo). `GET /api/ml/status`, `GET /api/ml/connect`, `GET /api/ml/callback` — fluxo OAuth do Mercado Livre.
 
 ## Mangás (MangaLivre)
@@ -85,9 +93,27 @@ As páginas de obra (`DetailHeader.tsx`, usada tanto pra `view === "episodes"` q
 
 Continua sendo uma SPA de state machine (o `view` no `page.tsx`), sem rotas de URL reais — decisão deliberada pra essa leva, não pendência.
 
+## Mobile
+
+Abaixo de `sm:` a `Sidebar` vira uma tab bar fixa no rodapé (ícone + label) em vez da rail vertical — libera a largura toda pro conteúdo, padrão de app mobile em vez de site desktop encolhido.
+
+O leitor de mangá (`MangaReader.tsx`) ganha um modo imersivo no mobile: a topbar de busca some (não faz sentido no meio da leitura), o cabeçalho vira uma faixa fina, e a área da página usa `100dvh` menos a tab bar do rodapé. A imagem usa `object-contain` preenchendo a caixa de verdade (trocado de `max-height`, que só reduz — nunca ampliava uma página menor que o espaço disponível, deixando barras vazias). Zoom por gesto via [`react-zoom-pan-pinch`](https://github.com/BetterTyped/react-zoom-pan-pinch): pinça com dois dedos, duplo-toque alterna, arrasta quando ampliado. As zonas de toque "página anterior/próxima" são faixas finas nas bordas (15% de cada lado) em vez da metade da tela inteira — cobrindo a imagem toda elas engoliriam qualquer gesto de zoom antes dele chegar na lib; com zoom ativo elas se desligam (`pointer-events-none`) pra não brigar com o pan.
+
+Botões de ação primários (Assistir/Ler/Continuar no `DetailHeader`) ocupam 100% da largura no mobile (`w-full sm:w-auto`) com padding maior — alvo de toque adequado em vez de um botão pequeno perdido no meio da tela.
+
 ### Login e biblioteca
 
 Login **sem senha**: só o email, guardado no `localStorage` do navegador (`goanime:email`) e repassado em toda chamada de biblioteca — não tem cookie/sessão de verdade, é o suficiente pra reconhecer o mesmo usuário entre visitas num app pessoal. `POST /api/auth/login` cria o usuário na primeira vez. A biblioteca (animes/mangás salvos) persiste em `backend/data/users.json` (arquivo JSON com mutex, path configurável via `DATA_DIR`; **nunca commitado**, está no `.gitignore` porque tem emails).
+
+### Progresso de leitura
+
+"Onde você parou" por mangá — o último capítulo aberto, não uma posição de página/scroll. Salvo automaticamente (best-effort, não bloqueia a leitura) toda vez que um capítulo é aberto, keyed por `source|mangaId` em `User.Progress` (mesmo `users.json`, sem tabela nova). Na página da obra isso vira um botão "Continuar — Cap. X" (em vez de "Ler", que sempre iria pro capítulo 1) e o capítulo correspondente fica destacado em roxo na grade.
+
+A grade de capítulos também tem um toggle de ordenação (menor→maior / maior→menor) — puramente no frontend (`sortChapters` em `page.tsx`), já que o backend sempre devolve em ordem de leitura. Números de capítulo com casa decimal (ex. `"108.100"`, splits de release) são parseados via `parseFloat`.
+
+### Mini perfil
+
+Clicar no avatar/email na topbar abre `ProfilePage.tsx` (em vez do login, quando já logado): animes e mangás salvos em duas fileiras, com o selo "Parou no Cap. X" nos cards de mangá que têm progresso, e um botão de remover por item. Abrir um card a partir do perfil pula a busca — vai direto pra lista de episódios/capítulos, já que um `LibraryItem` carrega `refId`+`source` suficientes pra isso (mesmo truque de reentrada que os cards da home usam).
 
 ### Produtos (Mercado Livre)
 
