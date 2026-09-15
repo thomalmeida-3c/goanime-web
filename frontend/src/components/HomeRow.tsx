@@ -19,9 +19,9 @@ export default function HomeRow({
           <button
             key={item.anilistId}
             onClick={() => onSelect(item)}
-            className="group w-36 shrink-0 text-left sm:w-44"
+            className="group w-36 shrink-0 text-left sm:w-60 md:w-44 lg:w-52 xl:w-60 cursor-pointer"
           >
-            <div className="relative aspect-[2/3] overflow-hidden rounded-lg bg-neutral-900">
+            <div className="relative aspect-2/3 overflow-hidden bg-neutral-900">
               {item.imageUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
@@ -35,7 +35,7 @@ export default function HomeRow({
                 </div>
               )}
             </div>
-            <p className="mt-2 line-clamp-2 text-sm text-neutral-200">{item.title}</p>
+            <p className="mt-2 line-clamp-1 text-sm text-neutral-200">{item.title}</p>
           </button>
         ))}
       </div>

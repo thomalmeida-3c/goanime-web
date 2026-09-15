@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import HeroCarousel from "@/components/HeroCarousel";
 import HomeRow from "@/components/HomeRow";
+import UpscaledVideoPlayer from "@/components/UpscaledVideoPlayer";
 import {
   type Anime,
   type Episode,
@@ -124,10 +125,10 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <header className="sticky top-0 z-10 border-b border-neutral-800 bg-neutral-950/90 px-6 py-3 backdrop-blur">
+      <header className="sticky top-0 z-10 border-b border-neutral-800 px-6 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center gap-4">
           <button onClick={goHome} className="shrink-0 text-lg font-semibold tracking-tight">
-            GoAnime Web
+            nomad
           </button>
           <form onSubmit={handleSearchSubmit} className="flex flex-1 gap-2">
             <input
@@ -140,7 +141,7 @@ export default function Home() {
             <button
               type="submit"
               disabled={loading}
-              className="rounded-md bg-orange-600 px-4 py-1.5 text-sm font-medium hover:bg-orange-500 disabled:opacity-50"
+              className="rounded-md bg-purple-600 px-4 py-1.5 text-sm font-medium hover:bg-purple-500 disabled:opacity-50"
             >
               {loading ? "Buscando..." : "Buscar"}
             </button>
@@ -148,28 +149,30 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="mx-auto">
         {view === "home" && (
           <>
-            {homeError && <p className="mb-4 text-sm text-red-400">{homeError}</p>}
+            {homeError && <p className="mb-4 text-sm text-purple-400">{homeError}</p>}
             {home && (
               <>
                 <HeroCarousel items={home.trending.slice(0, 6)} onSelect={handleSelectHomeItem} />
-                <HomeRow
-                  title="Animes em alta no Brasil"
-                  items={home.trending}
-                  onSelect={handleSelectHomeItem}
-                />
-                <HomeRow
-                  title="Populares da temporada"
-                  items={home.seasonPopular}
-                  onSelect={handleSelectHomeItem}
-                />
-                <HomeRow
-                  title="Mais populares"
-                  items={home.allTimePopular}
-                  onSelect={handleSelectHomeItem}
-                />
+                <div className="mx-auto max-w-6xl">
+                  <HomeRow
+                    title="Animes em alta no Brasil"
+                    items={home.trending}
+                    onSelect={handleSelectHomeItem}
+                  />
+                  <HomeRow
+                    title="Populares da temporada"
+                    items={home.seasonPopular}
+                    onSelect={handleSelectHomeItem}
+                  />
+                  <HomeRow
+                    title="Mais populares"
+                    items={home.allTimePopular}
+                    onSelect={handleSelectHomeItem}
+                  />
+                </div>
               </>
             )}
           </>
@@ -272,17 +275,7 @@ export default function Home() {
             {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
             {loading && <p className="text-sm text-neutral-400">Resolvendo stream...</p>}
 
-            {videoSrc && (
-              <video
-                key={videoSrc}
-                controls
-                autoPlay
-                className="w-full rounded-lg bg-black"
-                src={videoSrc}
-              >
-                Seu navegador não suporta vídeo HTML5.
-              </video>
-            )}
+            {videoSrc && <UpscaledVideoPlayer key={videoSrc} src={videoSrc} />}
           </>
         )}
       </main>

@@ -26,14 +26,14 @@ export default function HeroCarousel({
   }
 
   return (
-    <div className="relative mb-10 h-[420px] overflow-hidden rounded-xl bg-neutral-900 sm:h-[480px] md:h-[560px]">
+    <div className="relative mb-10 h-[320px] overflow-hidden bg-neutral-900 sm:h-[380px] md:h-[460px]">
       {(item.bannerUrl ?? item.imageUrl) && (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           key={item.anilistId}
           src={item.bannerUrl ?? item.imageUrl}
           alt={item.title}
-          className="absolute inset-0 h-full w-full object-cover"
+          className="absolute inset-0 h-full w-full object-right transition duration-500"
         />
       )}
       <div className="absolute inset-0 bg-gradient-to-r from-neutral-950 via-neutral-950/60 to-transparent" />
@@ -59,7 +59,7 @@ export default function HeroCarousel({
       )}
 
       <div className="absolute bottom-0 left-0 max-w-xl p-6 sm:p-10">
-        <h1 className="text-3xl font-extrabold leading-tight text-white drop-shadow-lg sm:text-5xl">
+        <h1 className="text-2xl font-extrabold leading-tighter line-clamp-2 text-white drop-shadow-lg tracking-tighter sm:text-4xl">
           {item.title}
         </h1>
 
@@ -78,15 +78,9 @@ export default function HeroCarousel({
         <div className="mt-5 flex items-center gap-3">
           <button
             onClick={() => onSelect(item)}
-            className="flex items-center gap-2 rounded-md bg-orange-600 px-5 py-2.5 text-sm font-bold uppercase tracking-wide text-white transition hover:bg-orange-500"
+            className="flex items-center gap-2 rounded-md bg-purple-600 px-5 py-2.5 text-sm font-bold uppercase tracking-wide text-white transition hover:bg-purple-500"
           >
-            ▶ Começar a assistir
-          </button>
-          <button
-            aria-label="Salvar"
-            className="rounded-md border border-neutral-500 p-2.5 text-white transition hover:border-white"
-          >
-            🔖
+            Começar a Assistir
           </button>
         </div>
 
@@ -98,7 +92,7 @@ export default function HeroCarousel({
                 onClick={() => setIndex(i)}
                 aria-label={`Ir para slide ${i + 1}`}
                 className={`h-1.5 rounded-full transition-all ${
-                  i === index ? "w-6 bg-orange-500" : "w-4 bg-neutral-600 hover:bg-neutral-400"
+                  i === index ? "w-6 bg-purple-500" : "w-4 bg-neutral-600 hover:bg-neutral-400"
                 }`}
               />
             ))}

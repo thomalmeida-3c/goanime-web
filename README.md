@@ -43,6 +43,16 @@ A home **não** tenta casar cada título com uma fonte (Goyabu/SuperFlix/...) de
 
 O hero (`HeroCarousel.tsx`) roda um carrossel com os 6 primeiros itens de "Em alta", com setas, indicadores e avanço automático a cada 7s.
 
+## Upscaling em tempo real (WebGL2)
+
+O player (`UpscaledVideoPlayer.tsx`) aplica um upscale+nitidez em tempo real no navegador — não é o upscaler do GoAnime (`internal/upscaler`), que é um processo offline em lote (extrai todo frame como PNG via ffmpeg, roda Anime4K, reencoda — minutos por episódio) feito pra arquivos baixados, incompatível com um vídeo que está sendo *streamado* ao vivo através do nosso proxy.
+
+Como funciona: o `<video>` real fica invisível (só decodifica e toca o áudio); a cada frame novo (`requestVideoFrameCallback`, com fallback pra `requestAnimationFrame`) ele é enviado como textura pra um shader WebGL2 (`lib/upscaleGL.ts`) que desenha num `<canvas>` maior que a resolução original — a amostragem bilinear da própria GPU faz o upscale, e um passo de nitidez com máscara de borda (unsharp mask que só realça onde há contraste local, pra não amplificar ruído/banding) recupera a definição que o upscale simples borra. É uma aproximação de passe único do efeito visual do Anime4K, não um port do algoritmo original (que é multi-passo).
+
+Como o canvas cobre o vídeo, os controles nativos do navegador somem junto — por isso o player tem sua própria barra (play/pause, seek, mudo, tela cheia, e o toggle "Upscaling"). Sem WebGL2 (raro hoje em dia), cai automaticamente pro `<video controls>` normal.
+
+**Pegadinha resolvida**: como o backend/frontend rodam em portas diferentes (8080/3000), o `<video>` precisa de `crossOrigin="anonymous"` pra o WebGL poder ler os frames como textura — sem isso o navegador lança `SecurityError` mesmo com o proxy já mandando `Access-Control-Allow-Origin: *`.
+
 ## O que funciona hoje
 
 - **Goyabu**: busca, episódios e stream **funcionam de ponta a ponta**, incluindo a resolução de vídeos hospedados no Blogger (o backend replica o fluxo `batchexecute` que o GoAnime CLI usa antes de entregar a URL ao mpv). Testado com "Sousou no Frieren".
