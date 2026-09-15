@@ -138,6 +138,7 @@ export type MangaItem = {
   tags?: string[];
   contentRating?: string;
   year?: number;
+  source: string;
 };
 
 export type ChapterItem = {
@@ -156,10 +157,13 @@ export function searchManga(query: string): Promise<MangaItem[]> {
   return request<MangaItem[]>("/api/manga/search", { q: query });
 }
 
-export function getMangaChapters(mangaId: string): Promise<ChapterItem[]> {
-  return request<ChapterItem[]>(`/api/manga/${mangaId}/chapters`, {});
+// getMangaChapters/getChapterPages need `source` because MangaDex and
+// MangaLivre ids come from unrelated schemes (a MangaDex UUID vs a
+// MangaLivre page URL) — the backend uses it to route to the right scraper.
+export function getMangaChapters(mangaId: string, source: string): Promise<ChapterItem[]> {
+  return request<ChapterItem[]>("/api/manga/chapters", { id: mangaId, source });
 }
 
-export function getChapterPages(chapterId: string): Promise<ChapterPagesResponse> {
-  return request<ChapterPagesResponse>(`/api/manga/chapter/${chapterId}/pages`, {});
+export function getChapterPages(chapterId: string, source: string): Promise<ChapterPagesResponse> {
+  return request<ChapterPagesResponse>("/api/manga/pages", { id: chapterId, source });
 }

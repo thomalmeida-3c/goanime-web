@@ -35,7 +35,7 @@ export default function MangaRow({
                 </div>
               )}
               <span className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-neutral-200">
-                Mangá
+                {item.source}
               </span>
             </div>
             <p className="mt-2 line-clamp-2 text-sm text-neutral-200">{item.title}</p>

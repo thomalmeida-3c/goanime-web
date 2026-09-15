@@ -45,7 +45,11 @@ func pickLocalized(m map[string]string) string {
 }
 
 // MangaItem is our public shape for a manga (mirrors HomeItem's style: flat,
-// camelCase, only what the frontend renders).
+// camelCase, only what the frontend renders). Source tells the frontend
+// (and our own chapters/pages handlers) which backend resolved this —
+// MangaDex and MangaLivre use unrelated id schemes (a MangaDex UUID vs a
+// MangaLivre page URL), so every downstream call has to be told which one
+// it's dealing with, the same way anime results carry a scraper Source.
 type MangaItem struct {
 	ID            string   `json:"id"`
 	Title         string   `json:"title"`
@@ -54,6 +58,7 @@ type MangaItem struct {
 	Tags          []string `json:"tags,omitempty"`
 	ContentRating string   `json:"contentRating,omitempty"`
 	Year          int      `json:"year,omitempty"`
+	Source        string   `json:"source"`
 }
 
 type ChapterItem struct {
@@ -154,6 +159,7 @@ func toMangaItems(resources []mdManga) []MangaItem {
 			Description:   pickLocalized(r.Attributes.Description),
 			ContentRating: r.Attributes.ContentRating,
 			Year:          r.Attributes.Year,
+			Source:        "MangaDex",
 		}
 		for _, tag := range r.Attributes.Tags {
 			if name := pickLocalized(tag.Attributes.Name); name != "" {

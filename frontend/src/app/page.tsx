@@ -148,7 +148,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const chs = await getMangaChapters(manga.id);
+      const chs = await getMangaChapters(manga.id, manga.source);
       setChapters(chs);
       setView("manga-chapters");
     } catch (err) {
@@ -159,12 +159,13 @@ export default function Home() {
   }
 
   async function handleSelectChapter(chapter: ChapterItem) {
+    if (!selectedManga) return;
     setSelectedChapter(chapter);
     setLoading(true);
     setError(null);
     setChapterPages([]);
     try {
-      const res = await getChapterPages(chapter.id);
+      const res = await getChapterPages(chapter.id, selectedManga.source);
       setChapterPages(res.pages);
       setView("manga-reader");
     } catch (err) {
@@ -353,7 +354,7 @@ export default function Home() {
                         </div>
                       )}
                       <span className="absolute right-1 top-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-neutral-200">
-                        Mangá
+                        {manga.source}
                       </span>
                     </div>
                     <p className="mt-1.5 line-clamp-2 text-xs text-neutral-300">{manga.title}</p>
@@ -489,7 +490,7 @@ export default function Home() {
               )}
               <div>
                 <h2 className="text-lg font-semibold">{selectedManga.title}</h2>
-                <p className="text-sm text-neutral-400">Mangá — MangaDex</p>
+                <p className="text-sm text-neutral-400">Mangá — {selectedManga.source}</p>
                 {selectedManga.description && (
                   <p className="mt-2 line-clamp-4 max-w-xl text-sm text-neutral-400">
                     {selectedManga.description}

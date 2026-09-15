@@ -8,4 +8,6 @@ var (
 	errEpisodeAndSourceRequired       = errors.New("query parameters 'episodeUrl' and 'source' are required")
 	errInvalidScheme                  = errors.New("proxy target must be http or https")
 	errAnimeNameAndEpisodeNumRequired = errors.New("query parameters 'animeName' and 'episodeNum' are required")
+	errMangaIDRequired                = errors.New("query parameter 'id' is required")
+	errChapterIDRequired              = errors.New("query parameter 'id' is required")
 )
