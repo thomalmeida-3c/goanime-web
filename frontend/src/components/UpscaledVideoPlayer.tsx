@@ -232,7 +232,7 @@ export default function UpscaledVideoPlayer({
           step={0.1}
           value={currentTime}
           onChange={seek}
-          className="h-1 w-full cursor-pointer accent-orange-500"
+          className="h-1 w-full cursor-pointer accent-purple-500"
         />
         <div className="flex items-center gap-3 text-xs text-neutral-200">
           <button onClick={togglePlay} className="text-lg leading-none">

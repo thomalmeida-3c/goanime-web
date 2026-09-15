@@ -35,7 +35,9 @@ npm run dev
 - `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
 - `GET /api/home` — fileiras estilo Crunchyroll para a home (em alta / populares da temporada / mais populares), com pôster, banner, nota e link direto pro anime quando disponível. Ver "Home" abaixo.
 - `GET /api/skip?animeName=<>&animeUrl=<>&episodeNum=<>` — tempos de abertura/encerramento (AniSkip), pra o botão "Pular abertura". Best-effort: sem match no AniList ou sem dado no AniSkip, devolve `{"op":null,"ed":null}` em vez de erro.
-- `GET /api/manga/home` — mangás populares em português (MangaDex). `GET /api/manga/search?q=` — busca nas duas fontes em paralelo. `GET /api/manga/chapters?id=<>&source=<>` — lista de capítulos. `GET /api/manga/pages?id=<>&source=<>` — resolve as URLs das páginas pro leitor. Ver "Mangás" abaixo.
+- `GET /api/manga/home` — mangás populares (MangaLivre). `GET /api/manga/latest` — mangás recém-adicionados (MangaLivre), pra fileira da página dedicada de Mangás. `GET /api/manga/search?q=` — busca. `GET /api/manga/chapters?id=<>&source=<>` — lista de capítulos. `GET /api/manga/pages?id=<>&source=<>` — resolve as URLs das páginas pro leitor. Ver "Mangás" abaixo.
+- `POST /api/auth/login` `{email}` — login sem senha (cria o usuário se não existir). `GET /api/library?email=` — lista a biblioteca salva. `POST /api/library` `{email, item}` — salva um anime/mangá. `DELETE /api/library?email=&kind=&refId=` — remove. Ver "Login e biblioteca" abaixo.
+- `GET /api/products?q=<termo>` — busca produtos reais no Mercado Livre (precisa de OAuth conectado, ver "Produtos" abaixo). `GET /api/ml/status`, `GET /api/ml/connect`, `GET /api/ml/callback` — fluxo OAuth do Mercado Livre.
 
 ## Mangás (MangaLivre)
 
@@ -75,6 +77,24 @@ Como o canvas cobre o vídeo, os controles nativos do navegador somem junto — 
 
 **Pegadinha resolvida**: como o backend/frontend rodam em portas diferentes (8080/3000), o `<video>` precisa de `crossOrigin="anonymous"` pra o WebGL poder ler os frames como textura — sem isso o navegador lança `SecurityError` mesmo com o proxy já mandando `Access-Control-Allow-Origin: *`.
 
+## Interface: sidebar, busca com autocomplete, páginas de obra
+
+A navegação (não só assistir/ler) segue o padrão Crunchyroll/MangaDex: uma sidebar fixa (`Sidebar.tsx`) com a marca e 4 seções — Início, Animes, Mangás, Produtos — substitui o header simples de antes. A busca (`SearchAutocomplete.tsx`, na `TopBar.tsx`) tem autocomplete com debounce de ~300ms, reaproveitando os mesmos `/api/search`/`/api/manga/search` já existentes — Enter ainda cai na tela de busca completa.
+
+As páginas de obra (`DetailHeader.tsx`, usada tanto pra `view === "episodes"` quanto `"manga-chapters"`) seguem o estilo MangaDex: banner desfocado ao fundo (ou a própria capa desfocada quando não há banner, caso do MangaLivre), capa em primeiro plano, badges de fonte/gêneros/nota, botão de ação principal e um botão de salvar (biblioteca). Uma fileira compacta de "Produtos relacionados" (`RelatedProducts.tsx`) aparece embaixo, buscando pelo título da obra — fica silenciosa se a conta do Mercado Livre não estiver conectada.
+
+Continua sendo uma SPA de state machine (o `view` no `page.tsx`), sem rotas de URL reais — decisão deliberada pra essa leva, não pendência.
+
+### Login e biblioteca
+
+Login **sem senha**: só o email, guardado no `localStorage` do navegador (`goanime:email`) e repassado em toda chamada de biblioteca — não tem cookie/sessão de verdade, é o suficiente pra reconhecer o mesmo usuário entre visitas num app pessoal. `POST /api/auth/login` cria o usuário na primeira vez. A biblioteca (animes/mangás salvos) persiste em `backend/data/users.json` (arquivo JSON com mutex, path configurável via `DATA_DIR`; **nunca commitado**, está no `.gitignore` porque tem emails).
+
+### Produtos (Mercado Livre)
+
+A busca pública do Mercado Livre (`/sites/MLB/search`, `/products/search`) **exige OAuth** — confirmado ao vivo (403 sem token), diferente do que a doc antiga sugeria. `ml_oauth.go` implementa o fluxo `authorization_code` completo: `GET /api/ml/connect` redireciona pro consentimento, `GET /api/ml/callback` troca o código por `access_token`/`refresh_token` (renovado automaticamente) e persiste em `backend/data/ml_token.json`. Sem conectar, `/api/products` devolve `{connected: false, products: []}` — a `ProdutosPage` mostra as instruções de setup nesse caso, sem erro.
+
+Pra conectar: crie uma aplicação em [Mercado Livre Developers](https://developers.mercadolivre.com.br), defina `ML_CLIENT_ID`, `ML_CLIENT_SECRET` e `ML_REDIRECT_URI` (ex.: `http://localhost:8080/api/ml/callback`) no ambiente do backend, e acesse `/api/ml/connect`. O link de afiliado (`buildAffiliateLink`) é um passthrough até a env var `ML_AFFILIATE_TAG` existir — o formato exato do programa de afiliados do ML não foi inventado, fica documentado aqui como pendência até termos a conta.
+
 ## O que funciona hoje
 
 - **Goyabu**: busca, episódios e stream **funcionam de ponta a ponta**, incluindo a resolução de vídeos hospedados no Blogger (o backend replica o fluxo `batchexecute` que o GoAnime CLI usa antes de entregar a URL ao mpv). Testado com "Sousou no Frieren".
@@ -95,5 +115,5 @@ O `pkg/goanime` público do GoAnime só expunha a fonte AnimeFire no enum `types
 ## Limitações conhecidas do MVP
 
 - O proxy de Blogger (`internal/player`) é um singleton global — só um stream Blogger ativo por vez no backend. Ok para uso local de uma pessoa, não para múltiplos usuários simultâneos.
-- Sem autenticação, sem persistência, sem histórico/continuar-assistindo.
+- Login sem senha/verificação e persistência em JSON (não SQL) — ok pro porte de um app pessoal. Biblioteca salva (lista), mas sem rastrear progresso por episódio/capítulo ("continuar assistindo/lendo").
 - SuperFlix e AniDB não têm stream funcional ligado ainda (ver acima).

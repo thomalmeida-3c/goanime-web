@@ -167,3 +167,93 @@ export function getMangaChapters(mangaId: string, source: string): Promise<Chapt
 export function getChapterPages(chapterId: string, source: string): Promise<ChapterPagesResponse> {
   return request<ChapterPagesResponse>("/api/manga/pages", { id: chapterId, source });
 }
+
+export function getMangaLatest(): Promise<{ latest: MangaItem[] }> {
+  return request("/api/manga/latest", {});
+}
+
+async function requestJSON<T>(
+  path: string,
+  method: "POST" | "DELETE",
+  params: Record<string, string>,
+  body?: unknown,
+): Promise<T> {
+  const url = new URL(API_BASE + path);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  const res = await fetch(url.toString(), {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errBody = (await res.json().catch(() => null)) as ApiError | null;
+    throw new Error(errBody?.error ?? `request failed with status ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+// --- Auth + biblioteca -----------------------------------------------------
+// Deliberately not real authentication: email only, no password, no
+// verification email (this app has no email-sending infra). Good enough to
+// remember a personal watch/read list across visits, not a security
+// boundary — see README "Login".
+
+export type LibraryItem = {
+  kind: "anime" | "manga";
+  title: string;
+  imageUrl?: string;
+  refId: string;
+  source: string;
+  addedAt?: string;
+};
+
+export type AuthUser = { email: string; library: LibraryItem[] };
+
+export function login(email: string): Promise<AuthUser> {
+  return requestJSON<AuthUser>("/api/auth/login", "POST", {}, { email });
+}
+
+export function getLibrary(email: string): Promise<LibraryItem[]> {
+  return request<LibraryItem[]>("/api/library", { email });
+}
+
+export function addToLibrary(email: string, item: LibraryItem): Promise<{ ok: boolean }> {
+  return requestJSON<{ ok: boolean }>("/api/library", "POST", {}, { email, item });
+}
+
+export function removeFromLibrary(
+  email: string,
+  kind: string,
+  refId: string,
+): Promise<{ ok: boolean }> {
+  return requestJSON<{ ok: boolean }>("/api/library", "DELETE", { email, kind, refId });
+}
+
+// --- Produtos (Mercado Livre) -----------------------------------------------
+// Real product search, gated behind a one-time OAuth connection (Mercado
+// Livre has no open/keyless search anymore) — see README "Produtos".
+
+export type Product = {
+  id: string;
+  title: string;
+  price: number;
+  thumbnail: string;
+  url: string;
+};
+
+export type ProductsResponse = { connected: boolean; products: Product[] };
+export type MLStatus = { configured: boolean; connected: boolean };
+
+export function searchProducts(query: string): Promise<ProductsResponse> {
+  return request<ProductsResponse>("/api/products", { q: query });
+}
+
+export function getMLStatus(): Promise<MLStatus> {
+  return request<MLStatus>("/api/ml/status", {});
+}
+
+export function mlConnectUrl(): string {
+  return API_BASE + "/api/ml/connect";
+}

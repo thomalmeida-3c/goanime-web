@@ -50,7 +50,9 @@ func mangaLivreGet(ctx context.Context, rawURL string) (*goquery.Document, error
 // wrapper classes (.c-tabs-item__content vs .page-item-detail) but the same
 // inner .post-title a / img markup, so one parser covers both.
 func parseMangaLivreCards(doc *goquery.Document, cardSelector string, limit int) []MangaItem {
-	var items []MangaItem
+	// []MangaItem{}, not var (nil) — a nil slice marshals to JSON `null`,
+	// which broke the frontend (it expects `[]` even for zero matches).
+	items := make([]MangaItem, 0)
 	seen := make(map[string]bool)
 	doc.Find(cardSelector).EachWithBreak(func(_ int, card *goquery.Selection) bool {
 		if len(items) >= limit {
@@ -100,6 +102,17 @@ func fetchMangaLivrePopular(ctx context.Context, limit int) ([]MangaItem, error)
 	return parseMangaLivreCards(doc, ".page-item-detail", limit), nil
 }
 
+// fetchMangaLivreLatest reads the site's "Recém Adicionados" catalog
+// ordering — for the dedicated Mangás page's second row.
+func fetchMangaLivreLatest(ctx context.Context, limit int) ([]MangaItem, error) {
+	u := mangaLivreBase + "/manga/?m_orderby=latest"
+	doc, err := mangaLivreGet(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	return parseMangaLivreCards(doc, ".page-item-detail", limit), nil
+}
+
 // mangaChapterNumRe pulls the leading number out of a chapter link's label
 // ("Capitulo 36" -> "36"), matching the plain numeric Chapter field the
 // frontend already expects from MangaDex.
@@ -115,12 +128,14 @@ func fetchMangaLivreChapters(ctx context.Context, mangaURL string) ([]ChapterIte
 		return nil, err
 	}
 
-	var items []ChapterItem
+	items := make([]ChapterItem, 0) // not nil — see parseMangaLivreCards
+	seen := make(map[string]bool)
 	doc.Find(".listing-chapters-wrap a").Each(func(_ int, a *goquery.Selection) {
 		href, ok := a.Attr("href")
-		if !ok || href == "" {
+		if !ok || href == "" || seen[href] {
 			return
 		}
+		seen[href] = true
 		text := strings.TrimSpace(a.Text())
 		num := mangaChapterNumRe.FindString(text)
 		if num == "" {
@@ -144,7 +159,7 @@ func resolveMangaLivreChapterPages(ctx context.Context, chapterURL string) ([]st
 		return nil, err
 	}
 
-	var pages []string
+	pages := make([]string, 0) // not nil — see parseMangaLivreCards
 	doc.Find("img.wp-manga-chapter-img").Each(func(_ int, img *goquery.Selection) {
 		src, ok := img.Attr("src")
 		if !ok || strings.TrimSpace(src) == "" {

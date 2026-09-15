@@ -1,6 +1,8 @@
 # Backend
 backend/goanime-server
+backend/server
 backend/*.exe
+backend/data/
 
 # Frontend
 frontend/node_modules/

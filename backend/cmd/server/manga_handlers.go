@@ -13,13 +13,47 @@ var (
 	mangaHomeCacheMu sync.Mutex
 	mangaHomeCache   []MangaItem
 	mangaHomeCacheAt time.Time
+
+	mangaLatestCacheMu sync.Mutex
+	mangaLatestCache   []MangaItem
+	mangaLatestCacheAt time.Time
 )
 
 func registerMangaRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/manga/home", handleMangaHome)
+	mux.HandleFunc("GET /api/manga/latest", handleMangaLatest)
 	mux.HandleFunc("GET /api/manga/search", handleMangaSearch)
 	mux.HandleFunc("GET /api/manga/chapters", handleMangaChapters)
 	mux.HandleFunc("GET /api/manga/pages", handleChapterPages)
+}
+
+// handleMangaLatest serves the "recém adicionados" row for the dedicated
+// Mangás page, cached the same way as handleMangaHome.
+func handleMangaLatest(w http.ResponseWriter, r *http.Request) {
+	mangaLatestCacheMu.Lock()
+	if mangaLatestCache != nil && time.Since(mangaLatestCacheAt) < mangaHomeCacheTTL {
+		cached := mangaLatestCache
+		mangaLatestCacheMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"latest": cached})
+		return
+	}
+	mangaLatestCacheMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	items, err := fetchMangaLivreLatest(ctx, 18)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+
+	mangaLatestCacheMu.Lock()
+	mangaLatestCache = items
+	mangaLatestCacheAt = time.Now()
+	mangaLatestCacheMu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{"latest": items})
 }
 
 // handleMangaHome serves the "popular" manga row, cached like /api/home —

@@ -10,4 +10,8 @@ var (
 	errAnimeNameAndEpisodeNumRequired = errors.New("query parameters 'animeName' and 'episodeNum' are required")
 	errMangaIDRequired                = errors.New("query parameter 'id' is required")
 	errChapterIDRequired              = errors.New("query parameter 'id' is required")
+	errInvalidEmail                   = errors.New("invalid email")
+	errEmailRequired                  = errors.New("query parameter 'email' is required")
+	errLibraryItemInvalid             = errors.New("'email', 'item.kind' and 'item.refId' (or 'kind'/'refId' for delete) are required")
+	errMLNotConfigured                = errors.New("ML_CLIENT_ID, ML_CLIENT_SECRET and ML_REDIRECT_URI must be set first")
 )

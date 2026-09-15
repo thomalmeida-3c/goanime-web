@@ -1,10 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import AnimesPage from "@/components/AnimesPage";
+import DetailHeader from "@/components/DetailHeader";
 import HeroCarousel from "@/components/HeroCarousel";
 import HomeRow from "@/components/HomeRow";
+import LoginModal from "@/components/LoginModal";
 import MangaReader from "@/components/MangaReader";
 import MangaRow from "@/components/MangaRow";
+import MangasPage from "@/components/MangasPage";
+import ProdutosPage from "@/components/ProdutosPage";
+import RelatedProducts from "@/components/RelatedProducts";
+import Sidebar, { type NavView } from "@/components/Sidebar";
+import TopBar from "@/components/TopBar";
 import UpscaledVideoPlayer from "@/components/UpscaledVideoPlayer";
 import {
   type Anime,
@@ -12,25 +20,40 @@ import {
   type Episode,
   type HomeItem,
   type HomeResponse,
+  type LibraryItem,
   type MangaItem,
   type SkipTimesResponse,
+  addToLibrary,
   getChapterPages,
   getEpisodes,
   getHome,
+  getLibrary,
   getMangaChapters,
   getMangaHome,
+  getMangaLatest,
   getSkipTimes,
   getStream,
   playbackUrl,
+  removeFromLibrary,
   searchAnime,
   searchManga,
 } from "@/lib/api";
 
-type View = "home" | "search" | "episodes" | "player" | "manga-chapters" | "manga-reader";
+type View =
+  | "home"
+  | "animes"
+  | "mangas"
+  | "produtos"
+  | "search"
+  | "episodes"
+  | "player"
+  | "manga-chapters"
+  | "manga-reader";
 type ContentFilter = "all" | "anime" | "manga";
 
+const EMAIL_STORAGE_KEY = "goanime:email";
+
 export default function Home() {
-  const [query, setQuery] = useState("");
   const [animeResults, setAnimeResults] = useState<Anime[]>([]);
   const [mangaResults, setMangaResults] = useState<MangaItem[]>([]);
   const [contentFilter, setContentFilter] = useState<ContentFilter>("all");
@@ -50,6 +73,11 @@ export default function Home() {
   const [home, setHome] = useState<HomeResponse | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
   const [mangaHome, setMangaHome] = useState<MangaItem[]>([]);
+  const [mangaLatest, setMangaLatest] = useState<MangaItem[]>([]);
+
+  const [email, setEmail] = useState<string | null>(null);
+  const [library, setLibrary] = useState<LibraryItem[]>([]);
+  const [showLogin, setShowLogin] = useState(false);
 
   useEffect(() => {
     getHome()
@@ -58,7 +86,45 @@ export default function Home() {
     getMangaHome()
       .then((res) => setMangaHome(res.popular))
       .catch(() => {}); // best-effort row; the anime home still works without it
+    getMangaLatest()
+      .then((res) => setMangaLatest(res.latest))
+      .catch(() => {});
+
+    const savedEmail = localStorage.getItem(EMAIL_STORAGE_KEY);
+    if (savedEmail) {
+      setEmail(savedEmail);
+      getLibrary(savedEmail)
+        .then(setLibrary)
+        .catch(() => {});
+    }
   }, []);
+
+  function handleLoggedIn(newEmail: string) {
+    setEmail(newEmail);
+    localStorage.setItem(EMAIL_STORAGE_KEY, newEmail);
+    setShowLogin(false);
+    getLibrary(newEmail)
+      .then(setLibrary)
+      .catch(() => {});
+  }
+
+  function isSaved(kind: "anime" | "manga", refId: string) {
+    return library.some((item) => item.kind === kind && item.refId === refId);
+  }
+
+  async function toggleSave(item: LibraryItem) {
+    if (!email) {
+      setShowLogin(true);
+      return;
+    }
+    if (isSaved(item.kind, item.refId)) {
+      await removeFromLibrary(email, item.kind, item.refId).catch(() => {});
+      setLibrary((prev) => prev.filter((l) => !(l.kind === item.kind && l.refId === item.refId)));
+    } else {
+      await addToLibrary(email, item).catch(() => {});
+      setLibrary((prev) => [...prev, item]);
+    }
+  }
 
   // Home only carries AniList metadata (title/poster/synopsis) — it never
   // resolves a source. Picking a title (from the hero, a row, or the search
@@ -67,7 +133,6 @@ export default function Home() {
   // MangaDex is a separate catalog, not one of our scraper sources.
   async function runSearch(q: string) {
     if (!q.trim()) return;
-    setQuery(q);
     setLoading(true);
     setError(null);
     try {
@@ -75,8 +140,8 @@ export default function Home() {
         searchAnime(q.trim()).catch(() => []),
         searchManga(q.trim()).catch(() => []),
       ]);
-      setAnimeResults(animes);
-      setMangaResults(mangas);
+      setAnimeResults(animes ?? []);
+      setMangaResults(mangas ?? []);
       setView("search");
       if (animes.length === 0 && mangas.length === 0) {
         setError("Nenhum resultado encontrado.");
@@ -86,11 +151,6 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }
-
-  function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    runSearch(query);
   }
 
   function handleSelectHomeItem(item: HomeItem) {
@@ -149,7 +209,7 @@ export default function Home() {
     setError(null);
     try {
       const chs = await getMangaChapters(manga.id, manga.source);
-      setChapters(chs);
+      setChapters(chs ?? []);
       setView("manga-chapters");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao carregar capítulos");
@@ -166,7 +226,7 @@ export default function Home() {
     setChapterPages([]);
     try {
       const res = await getChapterPages(chapter.id, selectedManga.source);
-      setChapterPages(res.pages);
+      setChapterPages(res.pages ?? []);
       setView("manga-reader");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao carregar as páginas");
@@ -177,7 +237,6 @@ export default function Home() {
 
   function goHome() {
     setView("home");
-    setQuery("");
     setAnimeResults([]);
     setMangaResults([]);
     setContentFilter("all");
@@ -186,6 +245,18 @@ export default function Home() {
     setSelectedManga(null);
     setChapters([]);
     setError(null);
+  }
+
+  function handleNavigate(navView: NavView) {
+    setAnimeResults([]);
+    setMangaResults([]);
+    setContentFilter("all");
+    setSelectedAnime(null);
+    setEpisodes([]);
+    setSelectedManga(null);
+    setChapters([]);
+    setError(null);
+    setView(navView);
   }
 
   function backToSearch() {
@@ -217,38 +288,35 @@ export default function Home() {
       ? episodes[currentEpisodeIndex + 1]
       : null;
 
-  return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100">
-      <header className="sticky top-0 z-10 border-b border-neutral-800 px-6 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center gap-4">
-          <button onClick={goHome} className="shrink-0 text-lg font-semibold tracking-tight">
-            nomad
-          </button>
-          <form onSubmit={handleSearchSubmit} className="flex flex-1 gap-2">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar anime ou mangá..."
-              className="flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-4 py-1.5 text-sm outline-none focus:border-neutral-500"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="rounded-md bg-purple-600 px-4 py-1.5 text-sm font-medium hover:bg-purple-500 disabled:opacity-50"
-            >
-              {loading ? "Buscando..." : "Buscar"}
-            </button>
-          </form>
-        </div>
-      </header>
+  const activeNav: NavView = (["home", "animes", "mangas", "produtos"] as const).includes(
+    view as NavView,
+  )
+    ? (view as NavView)
+    : "home";
 
-      <main className="mx-auto">
+  return (
+    <div className="flex min-h-screen bg-neutral-950 text-neutral-100">
+      <Sidebar active={activeNav} onNavigate={handleNavigate} />
+
+      <div className="min-w-0 flex-1">
+        <TopBar
+          email={email}
+          onSelectAnime={handleSelectAnime}
+          onSelectManga={handleSelectManga}
+          onSubmitSearch={runSearch}
+          onOpenLogin={() => setShowLogin(true)}
+        />
+
+        {showLogin && (
+          <LoginModal onClose={() => setShowLogin(false)} onLoggedIn={handleLoggedIn} />
+        )}
+
+        <main>
         {view === "home" && (
           <>
-            {homeError && <p className="mb-4 text-sm text-purple-400">{homeError}</p>}
+            {homeError && <p className="mb-4 px-4 pt-4 text-sm text-purple-400 sm:px-6">{homeError}</p>}
             {home && <HeroCarousel items={home.trending.slice(0, 6)} onSelect={handleSelectHomeItem} />}
-            <div className="mx-auto max-w-6xl">
+            <div className="px-4 sm:px-6">
               {home && (
                 <>
                   <HomeRow
@@ -273,8 +341,16 @@ export default function Home() {
           </>
         )}
 
+        {view === "animes" && <AnimesPage home={home} onSelect={handleSelectHomeItem} />}
+
+        {view === "mangas" && (
+          <MangasPage popular={mangaHome} latest={mangaLatest} onSelect={handleSelectManga} />
+        )}
+
+        {view === "produtos" && <ProdutosPage />}
+
         {view === "search" && (
-          <>
+          <div className="px-4 py-6 sm:px-6">
             <button onClick={goHome} className="mb-4 text-sm text-neutral-400 hover:text-neutral-200">
               ← Voltar para a home
             </button>
@@ -361,37 +437,43 @@ export default function Home() {
                   </button>
                 ))}
             </div>
-          </>
+          </div>
         )}
 
         {view === "episodes" && selectedAnime && (
-          <>
+          <div className="px-4 py-6 sm:px-6">
             <button
               onClick={backToSearch}
               className="mb-4 text-sm text-neutral-400 hover:text-neutral-200"
             >
               ← Voltar
             </button>
-            <div className="mb-6 flex gap-4">
-              {selectedAnime.ImageURL && (
-                <div className="relative h-40 w-28 shrink-0 overflow-hidden rounded-lg bg-neutral-900">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={selectedAnime.ImageURL}
-                    alt={selectedAnime.Name}
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-              )}
-              <div>
-                <h2 className="text-lg font-semibold">{selectedAnime.Name}</h2>
-                <p className="text-sm text-neutral-400">{selectedAnime.Source}</p>
-              </div>
-            </div>
+
+            <DetailHeader
+              title={selectedAnime.Name}
+              coverUrl={selectedAnime.ImageURL}
+              badges={[selectedAnime.Source]}
+              actionLabel="Assistir"
+              onAction={() => episodes[0] && handleSelectEpisode(episodes[0])}
+              saved={isSaved("anime", selectedAnime.URL)}
+              onToggleSave={() =>
+                toggleSave({
+                  kind: "anime",
+                  title: selectedAnime.Name,
+                  imageUrl: selectedAnime.ImageURL,
+                  refId: selectedAnime.URL,
+                  source: selectedAnime.Source,
+                })
+              }
+              canSave={!!email}
+            />
+
+            <RelatedProducts query={selectedAnime.Name} />
 
             {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
             {loading && <p className="text-sm text-neutral-400">Carregando...</p>}
 
+            <h2 className="mb-3 text-sm font-semibold text-neutral-300">Episódios</h2>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {episodes.map((ep, i) => (
                 <button
@@ -403,11 +485,11 @@ export default function Home() {
                 </button>
               ))}
             </div>
-          </>
+          </div>
         )}
 
         {view === "player" && selectedAnime && selectedEpisode && (
-          <div className="px-6 py-6">
+          <div className="px-4 py-6 sm:px-6">
             <button
               onClick={backToEpisodes}
               className="mb-4 text-sm text-neutral-400 hover:text-neutral-200"
@@ -473,31 +555,32 @@ export default function Home() {
         )}
 
         {view === "manga-chapters" && selectedManga && (
-          <div className="px-6 py-6">
+          <div className="px-4 py-6 sm:px-6">
             <button onClick={backToSearch} className="mb-4 text-sm text-neutral-400 hover:text-neutral-200">
               ← Voltar
             </button>
-            <div className="mb-6 flex gap-4">
-              {selectedManga.coverUrl && (
-                <div className="relative h-40 w-28 shrink-0 overflow-hidden rounded-lg bg-neutral-900">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={selectedManga.coverUrl}
-                    alt={selectedManga.title}
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-              )}
-              <div>
-                <h2 className="text-lg font-semibold">{selectedManga.title}</h2>
-                <p className="text-sm text-neutral-400">Mangá — {selectedManga.source}</p>
-                {selectedManga.description && (
-                  <p className="mt-2 line-clamp-4 max-w-xl text-sm text-neutral-400">
-                    {selectedManga.description}
-                  </p>
-                )}
-              </div>
-            </div>
+
+            <DetailHeader
+              title={selectedManga.title}
+              coverUrl={selectedManga.coverUrl}
+              badges={[selectedManga.source, ...(selectedManga.tags ?? [])]}
+              description={selectedManga.description}
+              actionLabel="Ler"
+              onAction={() => chapters[0] && handleSelectChapter(chapters[0])}
+              saved={isSaved("manga", selectedManga.id)}
+              onToggleSave={() =>
+                toggleSave({
+                  kind: "manga",
+                  title: selectedManga.title,
+                  imageUrl: selectedManga.coverUrl,
+                  refId: selectedManga.id,
+                  source: selectedManga.source,
+                })
+              }
+              canSave={!!email}
+            />
+
+            <RelatedProducts query={selectedManga.title} />
 
             {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
             {loading && <p className="text-sm text-neutral-400">Carregando...</p>}
@@ -505,6 +588,9 @@ export default function Home() {
               <p className="text-sm text-neutral-400">Nenhum capítulo em português encontrado.</p>
             )}
 
+            {chapters.length > 0 && (
+              <h2 className="mb-3 text-sm font-semibold text-neutral-300">Capítulos</h2>
+            )}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
               {chapters.map((ch) => (
                 <button
@@ -521,7 +607,7 @@ export default function Home() {
         )}
 
         {view === "manga-reader" && selectedManga && selectedChapter && (
-          <div className="px-6 py-6">
+          <div className="px-4 py-6 sm:px-6">
             <div className="mb-4 flex items-center justify-between">
               <button onClick={backToChapters} className="text-sm text-neutral-400 hover:text-neutral-200">
                 ← Voltar para capítulos
@@ -537,7 +623,8 @@ export default function Home() {
             {!loading && <MangaReader pages={chapterPages} />}
           </div>
         )}
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

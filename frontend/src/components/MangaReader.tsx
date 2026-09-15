@@ -35,6 +35,13 @@ export default function MangaReader({ pages }: { pages: string[] }) {
 
   return (
     <div className="flex flex-col items-center">
+      <div className="mb-3 h-1 w-full max-w-3xl overflow-hidden rounded-full bg-neutral-800">
+        <div
+          className="h-full bg-purple-500 transition-all"
+          style={{ width: `${((index + 1) / pages.length) * 100}%` }}
+        />
+      </div>
+
       <div className="relative flex w-full max-w-3xl items-center justify-center overflow-hidden rounded-lg bg-neutral-900">
         {!loaded && (
           <div className="absolute inset-0 flex items-center justify-center">
@@ -74,7 +81,7 @@ export default function MangaReader({ pages }: { pages: string[] }) {
         <button
           onClick={() => goTo(index - 1)}
           disabled={index === 0}
-          className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-neutral-600 disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-purple-500 hover:text-purple-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-inherit"
         >
           ← Anterior
         </button>
@@ -84,7 +91,7 @@ export default function MangaReader({ pages }: { pages: string[] }) {
         <button
           onClick={() => goTo(index + 1)}
           disabled={index === pages.length - 1}
-          className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-neutral-600 disabled:cursor-not-allowed disabled:opacity-40"
+          className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-purple-500 hover:text-purple-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-neutral-800 disabled:hover:text-inherit"
         >
           Próxima →
         </button>
