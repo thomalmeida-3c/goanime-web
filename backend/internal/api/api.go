@@ -1,0 +1,225 @@
+package api
+
+import (
+	"crypto/tls"
+	"fmt"
+	"net"
+	"net/http"
+	neturl "net/url"
+	"sync"
+	"time"
+
+	"context"
+
+	"github.com/pkg/errors"
+)
+
+// IsDisallowedIP checks if the given IP address falls under a disallowed category.
+// It returns true if the IP address is multicast, unspecified, loopback, or private.
+//
+// Parameters:
+// - hostIP: a string representing the IP address to check.
+//
+// Returns:
+// - bool: true if the IP address is disallowed, false otherwise.
+func IsDisallowedIP(hostIP string) bool {
+	// Parse the provided IP address string into a net.IP object.
+	ip := net.ParseIP(hostIP)
+	if ip == nil {
+		// Unparseable IP is disallowed by default to prevent bypasses.
+		return true
+	}
+
+	// Check if the IP address is in one of the disallowed categories:
+	// - IsMulticast: returns true if the IP is a multicast address.
+	// - IsUnspecified: returns true if the IP is unspecified (e.g., 0.0.0.0).
+	// - IsLoopback: returns true if the IP is a loopback address (e.g., 127.0.0.1).
+	// - IsPrivate: returns true if the IP is in a private range (e.g., 192.168.x.x).
+	return ip.IsMulticast() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate()
+}
+
+// checkDisallowedIP validates the IP address of a connection to ensure it is allowed.
+// If the IP address is disallowed, the connection is closed, and an error is returned.
+//
+// Parameters:
+// - conn: a net.Conn representing the network connection to check.
+//
+// Returns:
+// - error: an error if the IP address is disallowed or if there is an issue closing the connection.
+func checkDisallowedIP(conn net.Conn) error {
+	// Extract the IP address from the connection's remote address.
+	ip, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		// If we can't parse the address, close the connection as a safety measure.
+		_ = conn.Close()
+		return errors.New("failed to parse remote address")
+	}
+
+	// Check if the IP address is disallowed using the IsDisallowedIP function.
+	if IsDisallowedIP(ip) {
+		// Close the connection if the IP address is disallowed.
+		err := conn.Close()
+		if err != nil {
+			// Return an error if there was an issue closing the connection.
+			return err
+		}
+
+		// Return an error indicating the IP address is not allowed.
+		return errors.New("ip address is not allowed")
+	}
+
+	// Return nil if the IP address is allowed and the connection is valid.
+	return nil
+}
+
+// dialFunc handles both regular and TLS connections.
+// dialFunc handles both regular and TLS connections, establishing a network connection
+// based on the provided network, address, timeout, and optional TLS configuration.
+// It also checks if the IP address of the connection is allowed.
+//
+// Parameters:
+// - network: the network type (e.g., "tcp", "udp") to use for the connection.
+// - addr: the address to connect to, in the form "host:port".
+// - timeout: the maximum amount of time allowed for the connection attempt.
+// - tlsConfig: an optional *tls.Config for establishing a TLS connection.
+//
+// Returns:
+// - net.Conn: the established network connection.
+// - error: an error if the connection fails or if the IP address is disallowed.
+func dialFunc(network, addr string, timeout time.Duration, tlsConfig *tls.Config) (net.Conn, error) {
+	// Create a net.Dialer with the specified timeout.
+	dialer := &net.Dialer{Timeout: timeout}
+
+	var conn net.Conn
+	var err error
+
+	// If a TLS configuration is provided, use tls.DialWithDialer to establish a TLS connection.
+	// Otherwise, establish a regular network connection using dialer.Dial.
+	if tlsConfig != nil {
+		conn, err = tls.DialWithDialer(dialer, network, addr, tlsConfig)
+	} else {
+		conn, err = dialer.Dial(network, addr)
+	}
+
+	// If there was an error during the connection attempt, return the error.
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the IP address of the connection is allowed. If not, return an error.
+	if err := checkDisallowedIP(conn); err != nil {
+		return nil, err
+	}
+
+	// Return the established connection.
+	return conn, nil
+}
+
+// SafeTransport returns an http.Transport with custom dial functions for both regular and TLS connections.
+// The transport is configured with a specified timeout and ensures that all TLS connections use a minimum version of TLS 1.2.
+//
+// Parameters:
+// - timeout: the duration for both the connection timeout and the TLS handshake timeout.
+//
+// Returns:
+// - *http.Transport: a pointer to an http.Transport configured with custom dial functions and security settings.
+// safeTLSConfig returns the TLS settings used for every SSRF-guarded dial.
+//
+// NextProtos is what enables HTTP/2. A transport that sets DialTLSContext takes
+// over the TLS handshake, so net/http can no longer inject the ALPN protocol
+// list for us: without this, every connection negotiates http/1.1 and the burst
+// of requests these clients make is serialised over separate connections
+// instead of multiplexed on one. It pairs with ForceAttemptHTTP2 on the
+// transport — both are required, neither is enough alone.
+func safeTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+}
+
+func SafeTransport(timeout time.Duration) *http.Transport {
+	tlsConfig := safeTLSConfig()
+
+	return &http.Transport{
+		// Required alongside NextProtos: net/http only upgrades a transport with
+		// custom dial hooks to HTTP/2 when this is set.
+		ForceAttemptHTTP2: true,
+		// Custom dial function for regular (non-TLS) connections.
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFunc(network, addr, timeout, nil)
+		},
+		// Custom dial function for TLS connections, using the specified TLS configuration.
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialFunc(network, addr, timeout, tlsConfig)
+		},
+		// Set the timeout for the TLS handshake process.
+		TLSHandshakeTimeout: timeout,
+		// Connection pooling for better performance on repeated requests
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: 25,
+		IdleConnTimeout:     120 * time.Second,
+	}
+}
+
+// safeFetchClient is a singleton HTTP client with SSRF-safe transport
+var (
+	safeFetchClient     *http.Client
+	safeFetchClientOnce sync.Once
+)
+
+// SafeGet performs an HTTP GET request using a shared safe HTTP client.
+// The client validates IPs to prevent SSRF attacks.
+func SafeGet(url string) (*http.Response, error) {
+	safeFetchClientOnce.Do(func() {
+		safeFetchClient = &http.Client{
+			Transport: SafeTransport(15 * time.Second),
+		}
+	})
+	return safeFetchClient.Get(url) // #nosec G107
+}
+
+// ValidateExternalURL resolves the hostname of the given URL and rejects it if
+// any resolved IP is private, loopback, or otherwise disallowed.  Use this to
+// guard HTTP clients (e.g. surf/Chrome-impersonation) whose transport cannot be
+// replaced with SafeTransport.
+func ValidateExternalURL(rawURL string) error {
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL has no hostname: %s", rawURL)
+	}
+
+	// If the host is already an IP literal, check it directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if IsDisallowedIP(host) {
+			return fmt.Errorf("URL resolves to disallowed IP %s", host)
+		}
+		return nil
+	}
+
+	// Resolve hostname and check every returned address.
+	addrs, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("DNS lookup failed for %s: %w", host, err)
+	}
+	for _, addr := range addrs {
+		if IsDisallowedIP(addr) {
+			return fmt.Errorf("URL %s resolves to disallowed IP %s", host, addr)
+		}
+	}
+	return nil
+}
+
+// SafeDialContext returns a DialContext function that validates resolved IPs
+// against the SSRF allow-list. Inject this into custom http.Transport structs
+// that need their own TLS settings (e.g. HTTP/1.1-only HLS downloads) but
+// still require SSRF protection.
+func SafeDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialFunc(network, addr, timeout, nil)
+	}
+}

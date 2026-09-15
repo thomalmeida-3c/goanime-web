@@ -1,0 +1,212 @@
+// Package api provides enhanced anime search and streaming capabilities.
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+
+	"github.com/alvarorichard/Goanime/internal/models"
+	"github.com/alvarorichard/Goanime/internal/util"
+	"github.com/alvarorichard/Goanime/internal/util/jsonx"
+	"github.com/pkg/errors"
+)
+
+// ptbrURLSuffixes are noise suffixes commonly appended to anime URL slugs
+// on Brazilian streaming sites like Goyabu and AnimeFire.
+// The optional trailing \d+ handles Goyabu internal IDs (e.g. naruto-classico-online-hd-4).
+var ptbrURLSuffixes = regexp.MustCompile(
+	`(?i)(?:-(?:dublado|legendado|online|hd|completo|todos-os-episodios))+(?:-\d+)?$`,
+)
+
+// aniListEndpoint is the GraphQL URL used by FetchAnimeFromAniListWithURL.
+// Exposed as a package var so tests can redirect requests to an httptest.Server.
+var aniListEndpoint = "https://graphql.anilist.co"
+
+// extractRomajiFromURL extracts a romaji anime title from a Goyabu or AnimeFire URL slug.
+//
+// Brazilian anime sites use romaji-based URL slugs:
+//
+//	https://goyabu.io/anime/nanatsu-no-taizai          → "nanatsu no taizai"
+//	https://goyabu.io/anime/shingeki-no-kyojin-dublado  → "shingeki no kyojin"
+//	https://animefire.plus/animes/naruto-shippuuden-dublado-todos-os-episodios → "naruto shippuuden"
+//
+// This extracted romaji title can then be used to search AniList when
+// the original PT-BR display title fails to match.
+func extractRomajiFromURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Path == "" {
+		return ""
+	}
+
+	// Get the last path segment: /anime/nanatsu-no-taizai → nanatsu-no-taizai
+	path := strings.TrimRight(parsed.Path, "/")
+	segments := strings.Split(path, "/")
+	if len(segments) == 0 {
+		return ""
+	}
+	slug := segments[len(segments)-1]
+
+	// Ignore non-slug segments (e.g. bare domain, "anime", "animes")
+	if slug == "" || slug == "anime" || slug == "animes" {
+		return ""
+	}
+
+	// Remove known PT-BR noise suffixes
+	slug = ptbrURLSuffixes.ReplaceAllString(slug, "")
+
+	// Replace hyphens with spaces
+	title := strings.ReplaceAll(slug, "-", " ")
+
+	return strings.TrimSpace(title)
+}
+
+// generateSearchVariationsWithURL extends generateSearchVariations by adding
+// a romaji title extracted from the anime's URL slug.
+func generateSearchVariationsWithURL(cleanedName, animeURL string) []string {
+	variations := generateSearchVariations(cleanedName)
+
+	romaji := extractRomajiFromURL(animeURL)
+	if romaji == "" || strings.EqualFold(romaji, cleanedName) {
+		return variations
+	}
+
+	// Check if romaji is already in variations (case-insensitive)
+	for _, v := range variations {
+		if strings.EqualFold(v, romaji) {
+			return variations
+		}
+	}
+
+	// Prepend romaji right after the original name
+	result := make([]string, 0, len(variations)+2)
+	result = append(result, variations[0], romaji) // original name first, URL romaji second
+
+	// Also add title-cased version
+	titleCased := toTitleCase(romaji)
+	if titleCased != romaji {
+		result = append(result, titleCased)
+	}
+
+	result = append(result, variations[1:]...) // remaining variations
+	return result
+}
+
+// toTitleCase capitalizes the first letter of each word.
+func toTitleCase(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if w != "" {
+			words[i] = strings.ToUpper(string(w[0])) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// FetchAnimeFromAniListWithURL is like FetchAnimeFromAniList but also tries
+// romaji title extracted from the anime URL when the display name fails.
+func FetchAnimeFromAniListWithURL(animeName, animeURL string) (*models.AniListResponse, error) {
+	cleanedName := CleanTitle(animeName)
+	util.Debugf("Querying AniList for: '%s' (original: '%s', url: '%s')", cleanedName, animeName, animeURL)
+
+	// Check cache first
+	cache := util.GetAniListCache()
+	cacheKey := "anilist:" + strings.ToLower(cleanedName)
+	if cached, found := cache.Get(cacheKey); found {
+		var result models.AniListResponse
+		if err := jsonx.Unmarshal(cached, &result); err == nil && result.Data.Media.ID != 0 {
+			util.Debugf("AniList cache hit for: '%s'", cleanedName)
+			return &result, nil
+		}
+	}
+
+	// A session that has already been told the API is off does not ask again.
+	if aniListIsDisabled() {
+		return nil, ErrAniListAPIDisabled
+	}
+
+	// Generate search variations including romaji from URL
+	searchVariations := generateSearchVariationsWithURL(cleanedName, animeURL)
+
+	query := `query ($search: String) {
+        Media(search: $search, type: ANIME) {
+            id
+            title { romaji english native }
+            idMal
+            coverImage { large }
+            synonyms
+        }
+    }`
+
+	var lastErr error
+	for _, searchTerm := range searchVariations {
+		util.Debugf("Trying AniList search with: '%s'", searchTerm)
+
+		jsonData, err := json.Marshal(map[string]any{
+			"query": query,
+			"variables": map[string]any{
+				"search": searchTerm,
+			},
+		})
+		if err != nil {
+			lastErr = fmt.Errorf("JSON marshal failed: %w", err)
+			continue
+		}
+
+		resp, body, err := aniListPost(aniListEndpoint, jsonData) //nolint:bodyclose // aniListPost reads and closes the body before returning.
+		if err != nil {
+			lastErr = fmt.Errorf("AniList request failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			// An API that has announced it is switched off will answer every
+			// remaining search variation the same way, so stop rather than
+			// walking the list. Returning the named error also lets the caller
+			// fall back to another source instead of reporting a bare 403.
+			if bodySaysAniListDisabled(body) {
+				noteAniListDisabled()
+				return nil, ErrAniListAPIDisabled
+			}
+			// Cap the logged body: a Cloudflare challenge page is ~6KB of
+			// HTML/JS per attempt that buries the rest of the debug log.
+			snippet := string(body)
+			if len(snippet) > 300 {
+				snippet = snippet[:300] + "… (truncated)"
+			}
+			util.Debugf("AniList error response (%d bytes): %s", len(body), snippet)
+			lastErr = fmt.Errorf("AniList returned: %s", resp.Status)
+			continue
+		}
+
+		var result models.AniListResponse
+		if err := jsonx.Unmarshal(body, &result); err != nil {
+			lastErr = fmt.Errorf("JSON decode failed: %w", err)
+			continue
+		}
+
+		if result.Data.Media.ID == 0 {
+			lastErr = errors.New("no matching anime found on AniList")
+			continue
+		}
+
+		cache.Set(cacheKey, body)
+
+		util.Debugf("AniList found: ID=%d, MAL=%d, Title=%s (search term: '%s')",
+			result.Data.Media.ID,
+			result.Data.Media.IDMal,
+			result.Data.Media.Title.Romaji,
+			searchTerm)
+
+		return &result, nil
+	}
+
+	return nil, lastErr
+}

@@ -1,0 +1,58 @@
+# goanime-web
+
+MVP que expõe o [GoAnime](https://github.com/alvarorichard/GoAnime) (CLI de streaming de anime em Go) como uma API HTTP, com um frontend Next.js para consumi-la.
+
+## Estrutura
+
+- `backend/` — fork local do repositório GoAnime com um `cmd/server` novo que expõe busca/episódios/stream via HTTP, mais pequenos patches no `pkg/goanime` (veja "Patches" abaixo).
+- `frontend/` — Next.js 16 + TypeScript + Tailwind, consome a API do backend.
+
+## Rodando localmente
+
+### Backend
+
+```bash
+cd backend
+go run ./cmd/server
+# escuta em :8080 (ADDR=":porta" para mudar)
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm install   # se ainda não rodou
+cp .env.example .env.local  # já tem o valor padrão certo
+npm run dev
+# abre em http://localhost:3000
+```
+
+## Endpoints do backend
+
+- `GET /api/search?q=<nome>` — busca em todas as fontes (AnimeFire, Goyabu, SuperFlix, AniDB).
+- `GET /api/episodes?url=<animeUrl>&source=<Source>` — lista episódios.
+- `GET /api/stream?episodeUrl=<url>&source=<Source>&quality=best&mode=sub` — resolve a URL de stream e devolve `playbackUrl` (um endpoint local, `/api/proxy/:id`, que faz o proxy do vídeo já com os headers/token que o provedor exige).
+- `GET /api/proxy/:id` — proxy do vídeo (streaming, suporta `Range`, reescreve manifests HLS quando aplicável).
+
+## O que funciona hoje
+
+- **Goyabu**: busca, episódios e stream **funcionam de ponta a ponta**, incluindo a resolução de vídeos hospedados no Blogger (o backend replica o fluxo `batchexecute` que o GoAnime CLI usa antes de entregar a URL ao mpv). Testado com "Sousou no Frieren".
+- **SuperFlix**: busca e episódios funcionam, mas a resolução de stream do GoAnime exige um navegador Firefox headed para resolver um desafio Cloudflare — pesado demais para este MVP, não foi ligado ao `/api/stream`.
+- **AnimeFire**: o scraper do GoAnime não está retornando resultados no momento (parece ser um problema do próprio site/scraper upstream, não deste projeto).
+- **AniDB**: a API upstream respondeu 503 durante os testes.
+
+Isso é uma limitação dos scrapers de cada fonte (sites de terceiros com proteção anti-bot), não do backend em si — a infraestrutura de proxy/HLS já criada funciona para qualquer fonte que devolva uma URL de stream direta.
+
+## Patches aplicados ao GoAnime (em `backend/`)
+
+O `pkg/goanime` público do GoAnime só expunha a fonte AnimeFire no enum `types.Source` (comentário no código já avisava disso). Como a maioria dos resultados reais vem de Goyabu/SuperFlix/AniDB, foram feitos 3 ajustes pequenos e cirúrgicos:
+
+1. `pkg/goanime/types/source.go` — adicionado `SourceGoyabu`, `SourceSuperFlix`, `SourceAniDB` ao enum público (o motor interno já suportava essas fontes).
+2. `pkg/goanime/client.go` — `scraperKind()` não mapeava `AniDBType`; adicionado.
+3. `internal/player/export_web.go` (novo arquivo) — exporta `ResolveBloggerStream()`, um wrapper fino sobre a lógica de resolução de Blogger já existente no player do CLI, para o `cmd/server` poder reusá-la sem duplicar código.
+
+## Limitações conhecidas do MVP
+
+- O proxy de Blogger (`internal/player`) é um singleton global — só um stream Blogger ativo por vez no backend. Ok para uso local de uma pessoa, não para múltiplos usuários simultâneos.
+- Sem autenticação, sem persistência, sem histórico/continuar-assistindo.
+- SuperFlix e AniDB não têm stream funcional ligado ainda (ver acima).

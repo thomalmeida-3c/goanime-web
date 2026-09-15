@@ -1,0 +1,494 @@
+// Package api provides episode data fetching from multiple sources with fallback support.
+// This enables robust episode information retrieval even when primary APIs are unavailable.
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/alvarorichard/Goanime/internal/models"
+	"github.com/alvarorichard/Goanime/internal/util"
+	"github.com/alvarorichard/Goanime/internal/util/jsonx"
+)
+
+// kitsuBaseURL is the Kitsu API root. It is a var so tests can point it at a
+// local httptest server.
+var kitsuBaseURL = "https://kitsu.io"
+
+// EpisodeDataProvider defines an interface for fetching episode data from various sources
+type EpisodeDataProvider interface {
+	Name() string
+	FetchEpisodeData(animeID int, episodeNo int, anime *models.Anime) error
+}
+
+// JikanProvider fetches episode data from Jikan (MyAnimeList) API
+type JikanProvider struct{}
+
+func (p *JikanProvider) Name() string {
+	return "Jikan (MyAnimeList)"
+}
+
+func (p *JikanProvider) FetchEpisodeData(animeID, episodeNo int, anime *models.Anime) error {
+	if animeID <= 0 {
+		return fmt.Errorf("invalid anime ID: %d", animeID)
+	}
+
+	url := fmt.Sprintf("https://api.jikan.moe/v4/anime/%d/episodes/%d", animeID, episodeNo)
+
+	response, err := makeGetRequest(url, nil)
+	if err != nil {
+		return fmt.Errorf("jikan API request failed: %w", err)
+	}
+
+	data, ok := response["data"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("invalid response structure from Jikan")
+	}
+
+	populateEpisodeFromMap(anime, data)
+	return nil
+}
+
+// AniListProvider fetches episode data from AniList GraphQL API
+type AniListProvider struct{}
+
+func (p *AniListProvider) Name() string {
+	return "AniList"
+}
+
+func (p *AniListProvider) FetchEpisodeData(animeID, episodeNo int, anime *models.Anime) error {
+	// AniList uses its own ID system, so we need to use the AnilistID from the anime
+	anilistID := anime.AnilistID
+	if anilistID <= 0 {
+		// Try to find by MAL ID if we have it
+		if animeID > 0 {
+			var err error
+			anilistID, err = getAniListIDFromMAL(animeID)
+			if err != nil {
+				return fmt.Errorf("could not find AniList ID: %w", err)
+			}
+		} else {
+			return fmt.Errorf("no valid AniList or MAL ID available")
+		}
+	}
+
+	// AniList doesn't have per-episode endpoint, but we can get anime metadata
+	// Note: We don't declare unused variables in GraphQL to avoid 400 errors
+	query := `query ($id: Int) {
+		Media(id: $id, type: ANIME) {
+			id
+			title { romaji english native }
+			episodes
+			duration
+			description
+			streamingEpisodes {
+				title
+				thumbnail
+				url
+			}
+		}
+	}`
+
+	jsonData, err := json.Marshal(map[string]any{
+		"query": query,
+		"variables": map[string]any{
+			"id": anilistID,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("JSON marshal failed: %w", err)
+	}
+
+	resp, body, err := aniListPost("https://graphql.anilist.co", jsonData) //nolint:bodyclose // aniListPost reads and closes the body before returning.
+	if err != nil {
+		return fmt.Errorf("AniList request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("AniList returned: %s", resp.Status)
+	}
+
+	var result struct {
+		Data struct {
+			Media struct {
+				ID    int `json:"id"`
+				Title struct {
+					Romaji  string `json:"romaji"`
+					English string `json:"english"`
+					Native  string `json:"native"`
+				} `json:"title"`
+				Episodes          int    `json:"episodes"`
+				Duration          int    `json:"duration"`
+				Description       string `json:"description"`
+				StreamingEpisodes []struct {
+					Title     string `json:"title"`
+					Thumbnail string `json:"thumbnail"`
+					URL       string `json:"url"`
+				} `json:"streamingEpisodes"`
+			} `json:"Media"`
+		} `json:"data"`
+	}
+
+	if err := jsonx.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("JSON decode failed: %w", err)
+	}
+
+	if result.Data.Media.ID == 0 {
+		return fmt.Errorf("anime not found on AniList")
+	}
+
+	// Populate episode data from AniList response
+	if len(anime.Episodes) == 0 {
+		anime.Episodes = make([]models.Episode, 1)
+	}
+
+	ep := &anime.Episodes[0]
+	ep.Title.Romaji = result.Data.Media.Title.Romaji
+	ep.Title.English = result.Data.Media.Title.English
+	ep.Title.Japanese = result.Data.Media.Title.Native
+	ep.Duration = result.Data.Media.Duration * 60 // AniList returns duration in minutes
+
+	// Try to get episode-specific title from streaming episodes
+	if episodeNo > 0 && episodeNo <= len(result.Data.Media.StreamingEpisodes) {
+		streamingEp := result.Data.Media.StreamingEpisodes[episodeNo-1]
+		if streamingEp.Title != "" {
+			ep.Title.English = streamingEp.Title
+		}
+	}
+
+	return nil
+}
+
+// KitsuProvider fetches episode data from Kitsu API
+type KitsuProvider struct{}
+
+func (p *KitsuProvider) Name() string {
+	return "Kitsu"
+}
+
+func (p *KitsuProvider) FetchEpisodeData(animeID, episodeNo int, anime *models.Anime) error {
+	if animeID <= 0 {
+		// Try to search by anime name if no MAL ID
+		return p.fetchByAnimeName(anime, episodeNo)
+	}
+
+	// First, we need to find the Kitsu anime ID using the MAL ID
+	kitsuAnimeID, err := getKitsuAnimeID(animeID)
+	if err != nil {
+		// Fallback: try searching by anime name
+		return p.fetchByAnimeName(anime, episodeNo)
+	}
+
+	return p.fetchEpisodeByKitsuID(kitsuAnimeID, episodeNo, anime)
+}
+
+func (p *KitsuProvider) fetchByAnimeName(anime *models.Anime, episodeNo int) error {
+	// Clean the anime name for search (remove source tags and dub indicators)
+	searchName := CleanTitle(anime.Name)
+
+	searchURL := fmt.Sprintf("%s/api/edge/anime?filter[text]=%s&page[limit]=1",
+		kitsuBaseURL, strings.ReplaceAll(searchName, " ", "%20"))
+
+	req, err := http.NewRequest("GET", searchURL, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("failed to create search request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.api+json")
+
+	resp, err := util.GetFastClient().Do(req) // #nosec G704
+	if err != nil {
+		return fmt.Errorf("kitsu search failed: %w", err)
+	}
+	defer safeClose(resp.Body, "Kitsu search response")
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("kitsu search returned: %s", resp.Status)
+	}
+
+	var searchResult struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				CanonicalTitle string `json:"canonicalTitle"`
+				EpisodeCount   int    `json:"episodeCount"`
+				EpisodeLength  int    `json:"episodeLength"`
+				Synopsis       string `json:"synopsis"`
+				Titles         struct {
+					En   string `json:"en"`
+					EnJp string `json:"en_jp"`
+					JaJp string `json:"ja_jp"`
+				} `json:"titles"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := jsonx.Decode(resp.Body, maxJSONResponseBytes, &searchResult); err != nil {
+		return fmt.Errorf("kitsu search decode failed: %w", err)
+	}
+
+	if len(searchResult.Data) == 0 {
+		return fmt.Errorf("anime not found on Kitsu: %s", searchName)
+	}
+
+	// Use the first result and populate basic data
+	kitsuAnime := searchResult.Data[0]
+
+	if len(anime.Episodes) == 0 {
+		anime.Episodes = make([]models.Episode, 1)
+	}
+
+	ep := &anime.Episodes[0]
+	ep.Title.English = kitsuAnime.Attributes.CanonicalTitle
+	if kitsuAnime.Attributes.Titles.En != "" {
+		ep.Title.English = kitsuAnime.Attributes.Titles.En
+	}
+	ep.Title.Romaji = kitsuAnime.Attributes.Titles.EnJp
+	ep.Title.Japanese = kitsuAnime.Attributes.Titles.JaJp
+	ep.Duration = kitsuAnime.Attributes.EpisodeLength * 60 // Convert minutes to seconds
+
+	// Try to get episode-specific data if we have the Kitsu ID
+	if kitsuAnime.ID != "" {
+		_ = p.fetchEpisodeByKitsuID(kitsuAnime.ID, episodeNo, anime)
+	}
+
+	return nil
+}
+
+func (p *KitsuProvider) fetchEpisodeByKitsuID(kitsuAnimeID string, episodeNo int, anime *models.Anime) error {
+	// Fetch episodes for this anime
+	url := fmt.Sprintf("%s/api/edge/anime/%s/episodes?filter[number]=%d", kitsuBaseURL, kitsuAnimeID, episodeNo)
+
+	req, err := http.NewRequest("GET", url, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/vnd.api+json")
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := util.GetFastClient().Do(req) // #nosec G704
+	if err != nil {
+		return fmt.Errorf("kitsu request failed: %w", err)
+	}
+	defer safeClose(resp.Body, "Kitsu episode response")
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("kitsu returned: %s", resp.Status)
+	}
+
+	var result struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				Synopsis string `json:"synopsis"`
+				Titles   struct {
+					EnJp string `json:"en_jp"`
+					JaJp string `json:"ja_jp"`
+				} `json:"titles"`
+				CanonicalTitle string `json:"canonicalTitle"`
+				Number         int    `json:"number"`
+				Length         int    `json:"length"`
+				Airdate        string `json:"airdate"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := jsonx.Decode(resp.Body, maxJSONResponseBytes, &result); err != nil {
+		return fmt.Errorf("JSON decode failed: %w", err)
+	}
+
+	if len(result.Data) == 0 {
+		return fmt.Errorf("episode %d not found on Kitsu", episodeNo)
+	}
+
+	// Populate episode data from Kitsu response
+	if len(anime.Episodes) == 0 {
+		anime.Episodes = make([]models.Episode, 1)
+	}
+
+	ep := &anime.Episodes[0]
+	kitsuEp := result.Data[0].Attributes
+
+	ep.Title.English = kitsuEp.CanonicalTitle
+	if ep.Title.English == "" {
+		ep.Title.English = kitsuEp.Titles.EnJp
+	}
+	ep.Title.Japanese = kitsuEp.Titles.JaJp
+	ep.Synopsis = kitsuEp.Synopsis
+	ep.Duration = kitsuEp.Length * 60 // Kitsu returns length in minutes
+	ep.Aired = kitsuEp.Airdate
+
+	return nil
+}
+
+// getAniListIDFromMAL converts a MyAnimeList ID to an AniList ID
+func getAniListIDFromMAL(malID int) (int, error) {
+	query := `query ($malId: Int) {
+		Media(idMal: $malId, type: ANIME) {
+			id
+		}
+	}`
+
+	jsonData, err := json.Marshal(map[string]any{
+		"query": query,
+		"variables": map[string]any{
+			"malId": malID,
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	_, body, err := aniListPost("https://graphql.anilist.co", jsonData) //nolint:bodyclose // aniListPost reads and closes the body before returning.
+	if err != nil {
+		return 0, err
+	}
+
+	var result struct {
+		Data struct {
+			Media struct {
+				ID int `json:"id"`
+			} `json:"Media"`
+		} `json:"data"`
+	}
+
+	if err := jsonx.Unmarshal(body, &result); err != nil {
+		return 0, err
+	}
+
+	if result.Data.Media.ID == 0 {
+		return 0, fmt.Errorf("no AniList entry found for MAL ID %d", malID)
+	}
+
+	return result.Data.Media.ID, nil
+}
+
+// getKitsuAnimeID finds the Kitsu anime ID using the MyAnimeList ID
+func getKitsuAnimeID(malID int) (string, error) {
+	url := fmt.Sprintf("%s/api/edge/mappings?filter[externalSite]=myanimelist/anime&filter[externalId]=%d", kitsuBaseURL, malID)
+
+	req, err := http.NewRequest("GET", url, http.NoBody)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Accept", "application/vnd.api+json")
+	req.Header.Set("Content-Type", "application/vnd.api+json")
+
+	resp, err := util.GetFastClient().Do(req) // #nosec G704
+	if err != nil {
+		return "", err
+	}
+	defer safeClose(resp.Body, "Kitsu mapping response")
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("kitsu mapping lookup returned: %s", resp.Status)
+	}
+
+	var mappingResult struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Relationships struct {
+				Item struct {
+					Data struct {
+						ID   string `json:"id"`
+						Type string `json:"type"`
+					} `json:"data"`
+				} `json:"item"`
+			} `json:"relationships"`
+		} `json:"data"`
+	}
+
+	if err := jsonx.Decode(resp.Body, maxJSONResponseBytes, &mappingResult); err != nil {
+		return "", err
+	}
+
+	if len(mappingResult.Data) == 0 {
+		return "", fmt.Errorf("no Kitsu mapping found for MAL ID %d", malID)
+	}
+
+	return mappingResult.Data[0].Relationships.Item.Data.ID, nil
+}
+
+// populateEpisodeFromMap populates episode data from a map (used by Jikan)
+func populateEpisodeFromMap(anime *models.Anime, data map[string]any) {
+	if len(anime.Episodes) == 0 {
+		anime.Episodes = make([]models.Episode, 1)
+	}
+
+	ep := &anime.Episodes[0]
+	ep.Title.Romaji = getStringValue(data, "title_romanji")
+	ep.Title.English = getStringValue(data, "title")
+	ep.Title.Japanese = getStringValue(data, "title_japanese")
+	ep.Aired = getStringValue(data, "aired")
+	ep.Duration = getIntValue(data, "duration")
+	ep.IsFiller = getBoolValue(data, "filler")
+	ep.IsRecap = getBoolValue(data, "recap")
+	ep.Synopsis = getStringValue(data, "synopsis")
+}
+
+// defaultProviders returns the ordered list of episode data providers
+func defaultProviders() []EpisodeDataProvider {
+	return []EpisodeDataProvider{
+		&JikanProvider{},
+		&AniListProvider{},
+		&KitsuProvider{},
+	}
+}
+
+func cloneAnimeForEpisodeProvider(anime *models.Anime) models.Anime {
+	cloned := *anime
+	cloned.Episodes = append([]models.Episode(nil), anime.Episodes...)
+	return cloned
+}
+
+// GetEpisodeDataWithFallback fetches episode data trying multiple providers concurrently.
+// All providers are launched in parallel and the first successful result is used.
+func GetEpisodeDataWithFallback(animeID, episodeNo int, anime *models.Anime) error {
+	providers := defaultProviders()
+
+	type providerResult struct {
+		name string
+		err  error
+		data models.Anime // snapshot of populated data
+	}
+
+	resultCh := make(chan providerResult, len(providers))
+
+	for _, provider := range providers {
+		go func(p EpisodeDataProvider) {
+			util.Debugf("Trying episode data provider: %s", p.Name())
+			// Clone the slice as well as the struct. A shallow struct copy keeps
+			// the Episodes backing array shared, so providers updating episode
+			// fields would still race with each other.
+			animeCopy := cloneAnimeForEpisodeProvider(anime)
+			err := p.FetchEpisodeData(animeID, episodeNo, &animeCopy)
+			resultCh <- providerResult{name: p.Name(), err: err, data: animeCopy}
+		}(provider)
+	}
+
+	var errors []string
+	var lastErr error
+
+	for range providers {
+		res := <-resultCh
+		if res.err == nil {
+			util.Debugf("Successfully fetched episode data from %s", res.name)
+			// Copy episode data from the successful result
+			anime.Episodes = res.data.Episodes
+			return nil
+		}
+
+		lastErr = res.err
+		errMsg := fmt.Sprintf("%s: %v", res.name, res.err)
+		errors = append(errors, errMsg)
+		util.Debugf("Provider %s failed: %v", res.name, res.err)
+	}
+
+	// All providers failed
+	return fmt.Errorf("all episode data providers failed: %s (last error: %w)",
+		strings.Join(errors, "; "), lastErr)
+}

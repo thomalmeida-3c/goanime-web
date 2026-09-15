@@ -1,0 +1,1356 @@
+package util
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+
+	"charm.land/huh/v2"
+	"github.com/alvarorichard/Goanime/internal/tui"
+	"github.com/alvarorichard/Goanime/internal/version"
+	"github.com/ktr0731/go-fuzzyfinder"
+)
+
+// SubtitleInfo represents a single subtitle track
+type SubtitleInfo struct {
+	URL      string
+	Language string
+	Label    string
+}
+
+var (
+	playbackStateMu     sync.RWMutex
+	IsDebug             bool
+	minNameLength       = 4
+	ErrHelpRequested    = errors.New("help requested") // Custom error for help
+	GlobalSource        string                         // Global variable to store selected source
+	GlobalQuality       string                         // Global variable to store selected quality
+	GlobalMediaType     string                         // Global variable to store media type (anime, movie, tv)
+	GlobalSubsLanguage  string                         // Global variable to store subtitle language
+	GlobalAudioLanguage string                         // Global variable to store preferred audio language
+	GlobalSubtitles     []SubtitleInfo                 // Global variable to store current subtitles for playback
+	GlobalNoSubs        bool                           // Global flag to disable subtitles
+	GlobalReferer       string                         // Global variable to store referer for stream requests
+	GlobalUserAgent     string                         // Global variable to store the User-Agent the stream URL was signed for
+	GlobalOutputDir     string                         // Global variable to store custom download output directory
+	GlobalAnimeSource   string                         // Global variable to store the current anime source (e.g. "9Anime")
+)
+
+// StrictSourceResolution reports whether the GOANIME_STRICT_SOURCE environment
+// variable ("1" or "true") disables best-effort source fallback for
+// media whose source cannot be recognized — unrecognized input then surfaces
+// as an error instead of being guessed (R4/R5).
+func StrictSourceResolution() bool {
+	v := os.Getenv("GOANIME_STRICT_SOURCE")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// SetGlobalSubtitles stores subtitles for the current playback session
+func SetGlobalSubtitles(subs []SubtitleInfo) {
+	playbackStateMu.Lock()
+	GlobalSubtitles = append([]SubtitleInfo(nil), subs...)
+	playbackStateMu.Unlock()
+	if len(subs) > 0 {
+		Debugf("Stored %d subtitle track(s) for playback", len(subs))
+		for i, sub := range subs {
+			Debugf("  Subtitle %d: %s (%s)", i+1, sub.Label, sub.Language)
+		}
+	}
+}
+
+// GetGlobalSubtitles returns an isolated snapshot of the current subtitle list.
+func GetGlobalSubtitles() []SubtitleInfo {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+	return append([]SubtitleInfo(nil), GlobalSubtitles...)
+}
+
+// ClearGlobalSubtitles clears stored subtitles
+func ClearGlobalSubtitles() {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+	GlobalSubtitles = nil
+}
+
+// SetGlobalReferer stores the referer for stream requests
+func SetGlobalReferer(referer string) {
+	playbackStateMu.Lock()
+	GlobalReferer = referer
+	playbackStateMu.Unlock()
+	if referer != "" {
+		Debugf("Stored referer for stream requests: %s", referer)
+	}
+}
+
+// GetGlobalReferer returns the stored referer
+func GetGlobalReferer() string {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+	return GlobalReferer
+}
+
+// ClearGlobalReferer clears the stored referer
+func ClearGlobalReferer() {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+	GlobalReferer = ""
+}
+
+// SetGlobalUserAgent stores the User-Agent that the current stream URL was
+// signed for.
+//
+// SuperFlix's player CDN binds a signed URL to the exact User-Agent that
+// obtained it — the same URL answers 200 for that UA and 403 for any other,
+// including a different version of the same browser. mpv therefore cannot use
+// its own default; it has to replay the one recorded here.
+func SetGlobalUserAgent(userAgent string) {
+	playbackStateMu.Lock()
+	GlobalUserAgent = userAgent
+	playbackStateMu.Unlock()
+	if userAgent != "" {
+		Debugf("Stored user agent for stream requests: %s", userAgent)
+	}
+}
+
+// GetGlobalUserAgent returns the stored playback User-Agent, empty when the
+// current source does not pin one.
+func GetGlobalUserAgent() string {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+	return GlobalUserAgent
+}
+
+// ClearGlobalUserAgent clears the stored playback User-Agent.
+func ClearGlobalUserAgent() {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+	GlobalUserAgent = ""
+}
+
+// SetGlobalAnimeSource stores the current anime source (e.g. "AniDB", "Goyabu")
+func SetGlobalAnimeSource(source string) {
+	playbackStateMu.Lock()
+	GlobalAnimeSource = source
+	playbackStateMu.Unlock()
+	if source != "" {
+		Debugf("Stored anime source: %s", source)
+	}
+}
+
+// GetGlobalAnimeSource returns the stored anime source
+func GetGlobalAnimeSource() string {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+	return GlobalAnimeSource
+}
+
+// Is9AnimeSource returns true if the current stream is from 9Anime
+func Is9AnimeSource() bool {
+	return GetGlobalAnimeSource() == "9Anime"
+}
+
+// IsSuperFlixSource returns true if the current stream is from SuperFlix.
+//
+// SuperFlix streams are multi-audio HLS with an external Portuguese subtitle
+// track, so they need mpv's audio/subtitle language preferences applied — for
+// EVERY media type, not just movies/TV. Its anime and dorama entries carry the
+// same tracks, and gating those preferences on IsMovieOrTV silently dropped both
+// the chosen audio track and the subtitles for them.
+func IsSuperFlixSource() bool {
+	return GetGlobalAnimeSource() == "SuperFlix"
+}
+
+// SetGlobalAudioLanguage stores the current playback audio preference.
+func SetGlobalAudioLanguage(language string) {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+	GlobalAudioLanguage = language
+}
+
+// GetGlobalAudioLanguage returns the current playback audio preference.
+func GetGlobalAudioLanguage() string {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+	return GlobalAudioLanguage
+}
+
+// subtitleOption maps a display label to a sentinel value for subtitle selection.
+type subtitleOption struct {
+	Label string
+	Value int
+}
+
+// SelectSubtitles displays an interactive menu for the user to choose which
+// subtitle tracks to load. It updates GlobalSubtitles in-place so that the
+// subsequent call to GetSubtitleArgs only includes the selected tracks.
+// If there are 0 or 1 subtitles available, no menu is shown.
+func SelectSubtitles() {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+
+	if GlobalNoSubs || len(GlobalSubtitles) <= 1 {
+		return
+	}
+
+	// Build options: "All", each individual track, "None"
+	var items []subtitleOption
+	items = append(items, subtitleOption{"All subtitles", -1})
+	for i, sub := range GlobalSubtitles {
+		label := sub.Label
+		if label == "" {
+			label = sub.Language
+		}
+		if label == "" {
+			label = fmt.Sprintf("Subtitle %d", i+1)
+		}
+		items = append(items, subtitleOption{label, i})
+	}
+	items = append(items, subtitleOption{"No subtitles", -2})
+
+	idx, err := tui.Find(items, func(i int) string {
+		return items[i].Label
+	}, fuzzyfinder.WithPromptString("Subtitles: "))
+	if err != nil {
+		// On error/cancel keep all subtitles
+		return
+	}
+
+	selected := items[idx].Value
+	switch selected {
+	case -1:
+		// Keep all — no change needed
+		Debugf("User selected all %d subtitle track(s)", len(GlobalSubtitles))
+	case -2:
+		// Disable subtitles
+		GlobalSubtitles = nil
+		Debugf("User disabled subtitles")
+	default:
+		if selected >= 0 && selected < len(GlobalSubtitles) {
+			kept := GlobalSubtitles[selected]
+			GlobalSubtitles = []SubtitleInfo{kept}
+			Debugf("User selected subtitle: %s (%s)", kept.Label, kept.Language)
+		}
+	}
+}
+
+// PromptSubtitleLanguage always prompts the user to select a subtitle language
+// for multi-language platforms (e.g., 9Anime). This MUST be called after every
+// episode selection, without exception. Unlike SelectSubtitles, this function
+// always shows the prompt regardless of the number of available tracks.
+// It updates GlobalSubtitles in-place so that GetSubtitleArgs returns
+// the correct arguments for mpv.
+func PromptSubtitleLanguage() {
+	playbackStateMu.Lock()
+	defer playbackStateMu.Unlock()
+
+	if GlobalNoSubs {
+		Debugf("Subtitles disabled by user (--no-subs), skipping subtitle prompt")
+		GlobalSubtitles = nil
+		return
+	}
+
+	tracks := GlobalSubtitles
+
+	// No tracks available — inform the user and continue without subtitles
+	if len(tracks) == 0 {
+		fmt.Println("\nNo subtitle tracks available for this episode.")
+		return
+	}
+
+	// Single track — still ask the user if they want it
+	if len(tracks) == 1 {
+		label := tracks[0].Label
+		if label == "" {
+			label = tracks[0].Language
+		}
+		if label == "" {
+			label = "Unknown"
+		}
+
+		fmt.Printf("\n1 subtitle track available: %s\n", label)
+
+		items := []subtitleOption{
+			{label, 0},
+			{"No subtitles", -2},
+		}
+
+		idx, err := tui.Find(items, func(i int) string {
+			return items[i].Label
+		}, fuzzyfinder.WithPromptString("Select subtitle language: "))
+		if err != nil {
+			// On error/cancel keep the track
+			fmt.Printf("Subtitles: %s\n", label)
+			return
+		}
+
+		if items[idx].Value == -2 {
+			GlobalSubtitles = nil
+			fmt.Println("Subtitles: disabled")
+			Debugf("User disabled subtitles")
+		} else {
+			fmt.Printf("Subtitles: %s\n", label)
+			Debugf("User selected subtitle: %s", label)
+		}
+		return
+	}
+
+	// Multiple tracks — show full selection menu
+	fmt.Printf("\n%d subtitle language(s) available:\n", len(tracks))
+
+	var items []subtitleOption
+	items = append(items, subtitleOption{"All subtitles", -1})
+	for i, sub := range tracks {
+		label := sub.Label
+		if label == "" {
+			label = sub.Language
+		}
+		if label == "" {
+			label = fmt.Sprintf("Subtitle %d", i+1)
+		}
+		items = append(items, subtitleOption{label, i})
+	}
+	items = append(items, subtitleOption{"No subtitles", -2})
+
+	idx, err := tui.Find(items, func(i int) string {
+		return items[i].Label
+	}, fuzzyfinder.WithPromptString("Select subtitle language: "))
+	if err != nil {
+		// On error/cancel keep all subtitles
+		fmt.Println("Subtitles: all (default)")
+		return
+	}
+
+	selected := items[idx].Value
+	switch selected {
+	case -1:
+		// Keep all — no change needed
+		fmt.Printf("Subtitles: all (%d tracks)\n", len(GlobalSubtitles))
+		Debugf("User selected all %d subtitle track(s)", len(GlobalSubtitles))
+	case -2:
+		// Disable subtitles
+		GlobalSubtitles = nil
+		fmt.Println("Subtitles: disabled")
+		Debugf("User disabled subtitles")
+	default:
+		if selected >= 0 && selected < len(GlobalSubtitles) {
+			kept := GlobalSubtitles[selected]
+			GlobalSubtitles = []SubtitleInfo{kept}
+			fmt.Printf("Subtitles: %s\n", kept.Label)
+			Debugf("User selected subtitle: %s (%s)", kept.Label, kept.Language)
+		}
+	}
+}
+
+// GetSubtitleArgs returns mpv arguments for subtitles.
+//
+// Always emits one --sub-file=URL per track. Never use --sub-files=URL1:URL2:
+// on Unix the separator is ":", which collides with "https://" and silently
+// corrupts every remote subtitle URL (SuperFlix ships WEBVTT behind .html
+// paths). That made mpv fail to load movie streams with multiple tracks.
+func GetSubtitleArgs() []string {
+	playbackStateMu.RLock()
+	defer playbackStateMu.RUnlock()
+
+	if GlobalNoSubs || len(GlobalSubtitles) == 0 {
+		return nil
+	}
+
+	args := make([]string, 0, len(GlobalSubtitles))
+	for _, sub := range GlobalSubtitles {
+		if sub.URL == "" {
+			continue
+		}
+		args = append(args, "--sub-file="+sub.URL)
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	return args
+}
+
+// Cleanup function to be called on program exit
+var (
+	cleanupFuncs []func()
+	cleanupMu    sync.Mutex
+)
+
+// RegisterCleanup registers a function to be called on program exit
+func RegisterCleanup(fn func()) {
+	cleanupMu.Lock()
+	defer cleanupMu.Unlock()
+	cleanupFuncs = append(cleanupFuncs, fn)
+}
+
+// RunCleanup runs all registered cleanup functions
+func RunCleanup() {
+	cleanupMu.Lock()
+	funcs := make([]func(), len(cleanupFuncs))
+	copy(funcs, cleanupFuncs)
+	cleanupMu.Unlock()
+	for _, fn := range funcs {
+		fn()
+	}
+	// Print performance report if enabled
+	if PerfEnabled {
+		GetPerfTracker().PrintReport()
+	}
+}
+
+// ErrorHandler returns a string with the error message, if debug mode is enabled, it will return the full error with details.
+func ErrorHandler(err error) string {
+	if IsDebug {
+		if LogFilePath != "" {
+			return fmt.Sprintf("%+v\n\nDebug log saved to: %s", err, LogFilePath)
+		}
+		return fmt.Sprintf("%+v", err)
+	} else {
+		return fmt.Sprintf("%v -- run the program with --debug to see details and save a log file", err)
+	}
+}
+
+// Helper prints the beautiful help message
+func Helper() {
+	ShowBeautifulHelp()
+}
+
+// Custom error types for different exit conditions
+var (
+	ErrUpdateRequested        = errors.New("update requested")
+	ErrDownloadRequested      = errors.New("download requested")
+	ErrUpscaleRequested       = errors.New("upscale requested")
+	ErrMovieDownloadRequested = errors.New("movie download requested")
+)
+
+// DownloadRequest holds download command parameters
+type DownloadRequest struct {
+	AnimeName    string
+	EpisodeNum   int
+	IsRange      bool
+	StartEpisode int
+	EndEpisode   int
+	Source       string // Added source field for specifying anime source
+	Quality      string // Added quality field for video quality
+	// Movie/TV specific fields
+	IsMovie      bool   // True if downloading a movie from FlixHQ/SFlix
+	IsTV         bool   // True if downloading a TV show from FlixHQ/SFlix
+	SeasonNum    int    // Season number for TV shows
+	SubsLanguage string // Subtitle language preference
+	OutputDir    string // Custom output directory for downloads
+	// Download-all mode
+	IsAll bool // True to download ALL episodes (anime) or ALL seasons+episodes (TV/series/dorama)
+}
+
+// UpscaleRequest holds upscale command parameters
+type UpscaleRequest struct {
+	InputPath        string  // Input video or image file path
+	OutputPath       string  // Output file path (optional, defaults to input_upscaled.ext)
+	ScaleFactor      int     // Upscale multiplier (default: 2)
+	Passes           int     // Number of processing passes (default: 2)
+	StrengthColor    float64 // Line thinning strength 0-1 (default: 0.333)
+	StrengthGradient float64 // Sharpening strength 0-1 (default: 1.0)
+	FastMode         bool    // Use fast mode (lower quality)
+	HighQuality      bool    // Use high quality mode (slower)
+	PreserveAudio    bool    // Preserve original audio track
+	UseGPU           bool    // Use GPU encoding if available
+	VideoBitrate     string  // Video bitrate (default: 8M)
+	Workers          int     // Number of parallel workers
+}
+
+// Global variable to store download request
+var GlobalDownloadRequest *DownloadRequest
+
+// Global variable to store upscale request
+var GlobalUpscaleRequest *UpscaleRequest
+
+// FlagParser parses the -flags and returns the anime name
+func FlagParser() (string, error) {
+	// Override the default flag.Usage to show our custom help
+	flag.Usage = func() {
+		Helper()
+	}
+
+	// Use a custom FlagSet to avoid conflicts with library flags (e.g., Anime4KGo)
+	fs := flag.NewFlagSet("goanime", flag.ContinueOnError)
+
+	// Define flags
+	debug := fs.Bool("debug", false, "enable debug mode")
+	perf := fs.Bool("perf", false, "enable performance profiling")
+	help := fs.Bool("help", false, "show help message")
+	altHelp := fs.Bool("h", false, "show help message")
+	versionFlag := fs.Bool("version", false, "show version information")
+	updateFlag := fs.Bool("update", false, "check for updates and update if available")
+	downloadFlag := fs.Bool("d", false, "download mode")
+	rangeFlag := fs.Bool("r", false, "download episode range (use with -d)")
+	allFlag := fs.Bool("a", false, "download ALL episodes/seasons (use with -d or -dm)")
+	movieDownloadFlag := fs.Bool("dm", false, "download movie/TV from FlixHQ/SFlix")
+	sourceFlag := fs.String("source", "", "specify source (anidb, animefire, goyabu, superflix, ptbr)")
+	qualityFlag := fs.String("quality", "best", "specify video quality (best, worst, 720p, 1080p, etc.)")
+	mediaTypeFlag := fs.String("type", "", "specify media type (anime, movie, tv)")
+	subsLanguageFlag := fs.String("subs", "english", "specify subtitle language for movies/TV (FlixHQ only)")
+	audioLanguageFlag := fs.String("audio", "pt-BR,pt,english", "specify preferred audio language for movies/TV (FlixHQ only)")
+	noSubsFlag := fs.Bool("no-subs", false, "disable subtitles for movies/TV (FlixHQ only)")
+	outputDirFlag := fs.String("o", "", "output directory for downloads (default: ~/.local/goanime/downloads/anime/)")
+
+	// SuperFlix Cloudflare-bypass browser flags. These surface the previously
+	// env-only knobs (GOANIME_SF_*) as discoverable CLI options; each just sets
+	// the corresponding env var so the deeper scraper code keeps reading os.Getenv.
+	sfHeadlessFlag := fs.Bool("sf-headless", false, "run the Cloudflare-bypass browser headless (advanced; Turnstile usually rejects headless)")
+	sfBundledFlag := fs.Bool("sf-bundled", false, "force Playwright's bundled Chromium for the bypass instead of system Chrome")
+	sfBrowserFlag := fs.String("sf-browser", "", "browser channel for the Cloudflare bypass (e.g. chrome, chrome-beta, msedge); default: auto")
+	sfMaskFlag := fs.Bool("sf-mask", false, "enable fingerprint masking for the bypass browser (advanced escape hatch)")
+	// Hiding the bypass browser is the default; this flag stays so existing
+	// commands and scripts that pass it keep working.
+	sfOffscreenFlag := fs.Bool("sf-offscreen", false, "(default) keep the bypass browser minimized; it surfaces only if the challenge needs you, then closes")
+	sfWindowFlag := fs.Bool("sf-window", false, "always show the bypass browser window instead of keeping it minimized")
+
+	// Upscale flags
+	upscaleFlag := fs.Bool("upscale", false, "upscale mode - enhance video/image quality using Anime4K algorithm")
+	upscaleOutputFlag := fs.String("upscale-output", "", "output path for upscaled file (default: input_upscaled.ext)")
+	upscaleScaleFlag := fs.Int("upscale-scale", 2, "upscale factor (default: 2x)")
+	upscalePassesFlag := fs.Int("upscale-passes", 2, "number of processing passes (default: 2)")
+	upscaleFastFlag := fs.Bool("upscale-fast", false, "use fast mode (lower quality but faster)")
+	upscaleHQFlag := fs.Bool("upscale-hq", false, "use high quality mode (slower but better results)")
+	upscaleGPUFlag := fs.Bool("upscale-gpu", false, "use GPU encoding for video output")
+	upscaleBitrateFlag := fs.String("upscale-bitrate", "8M", "video bitrate for output (default: 8M)")
+	upscaleWorkersFlag := fs.Int("upscale-workers", 0, "number of parallel workers (default: CPU cores)")
+
+	// Set custom usage for our FlagSet
+	fs.Usage = func() {
+		Helper()
+	}
+
+	// Parse the flags early before any manipulation of os.Args
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			Helper()
+			return "", ErrHelpRequested
+		}
+		return "", err
+	}
+
+	// Apply SuperFlix bypass-browser flags by exporting the env vars the scraper
+	// reads. Only set when provided so an unset flag never overrides an env var
+	// the user exported manually.
+	if *sfHeadlessFlag {
+		_ = os.Setenv("GOANIME_SF_HEADLESS", "1")
+	}
+	if *sfBundledFlag {
+		_ = os.Setenv("GOANIME_SF_BUNDLED", "1")
+	}
+	if *sfBrowserFlag != "" {
+		_ = os.Setenv("GOANIME_SF_CHROME_CHANNEL", *sfBrowserFlag)
+	}
+	if *sfMaskFlag {
+		_ = os.Setenv("GOANIME_SF_MASK", "1")
+	}
+	if *sfOffscreenFlag {
+		_ = os.Setenv("GOANIME_SF_OFFSCREEN", "1")
+	}
+	// --sf-window is the opt-out from the hidden default. Checked after
+	// --sf-offscreen so that passing both lands on "show it", the less
+	// surprising outcome of a contradictory pair.
+	if *sfWindowFlag {
+		_ = os.Setenv("GOANIME_SF_OFFSCREEN", "0")
+	}
+
+	// Set debug mode based on flag (set unconditionally for consistency)
+	IsDebug = *debug
+
+	// Set performance profiling mode
+	PerfEnabled = *perf
+	if PerfEnabled {
+		// Also enable debug for performance mode to see detailed logs
+		IsDebug = true
+		Debug("Performance profiling enabled")
+	}
+
+	// Store global configurations
+	GlobalSource = *sourceFlag
+	GlobalQuality = *qualityFlag
+	GlobalMediaType = *mediaTypeFlag
+	GlobalSubsLanguage = *subsLanguageFlag
+	GlobalAudioLanguage = *audioLanguageFlag
+	GlobalNoSubs = *noSubsFlag
+	GlobalOutputDir = *outputDirFlag
+
+	if *noSubsFlag {
+		Debug("Subtitles disabled by user")
+	}
+
+	if *versionFlag || version.HasVersionArg() {
+		version.ShowVersion()
+		return "", ErrHelpRequested // Signal version instead of exiting
+	}
+
+	if *help || *altHelp {
+		Helper()
+		return "", ErrHelpRequested // Signal help instead of exiting
+	}
+
+	if *updateFlag {
+		return "", ErrUpdateRequested // Signal update request
+	}
+
+	// Handle download mode
+	if *downloadFlag {
+		return handleDownloadModeWithSmart(fs.Args(), *rangeFlag, *allFlag, *sourceFlag, *qualityFlag)
+	}
+
+	// Handle movie/TV download mode (FlixHQ/SFlix)
+	if *movieDownloadFlag {
+		return handleMovieDownloadMode(fs.Args(), *rangeFlag, *allFlag, *qualityFlag, *subsLanguageFlag, *mediaTypeFlag)
+	}
+
+	// Handle upscale mode
+	if *upscaleFlag {
+		return handleUpscaleMode(
+			fs,
+			*upscaleOutputFlag,
+			*upscaleScaleFlag,
+			*upscalePassesFlag,
+			*upscaleFastFlag,
+			*upscaleHQFlag,
+			*upscaleGPUFlag,
+			*upscaleBitrateFlag,
+			*upscaleWorkersFlag,
+		)
+	}
+
+	if *debug {
+		Debug("Debug mode is enabled")
+	}
+
+	// If the user has provided an anime name as an argument, we use it.
+	var animeName string
+	if len(fs.Args()) > 0 {
+		animeName = strings.Join(fs.Args(), " ")
+		// Check if it has some flags and remove them
+		if strings.Contains(animeName, "-") {
+			animeName = strings.Split(animeName, "-")[0]
+		}
+		Debug("Anime name", "name", animeName)
+		if len(animeName) < minNameLength {
+			return "", fmt.Errorf("anime name must have at least %d characters, you entered: %v", minNameLength, animeName)
+		}
+		return TreatingAnimeName(animeName), nil
+	}
+	animeName, err := getUserInput("Enter anime/movie name")
+	return TreatingAnimeName(animeName), err
+}
+
+// getUserInput prompts the user for input the anime name and returns it
+func getUserInput(label string) (string, error) {
+	var animeName string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title(label).
+				Description("Type the anime title and press Enter").
+				Value(&animeName).
+				Validate(func(v string) error {
+					if len(strings.TrimSpace(v)) < minNameLength {
+						return fmt.Errorf("name must have at least %d characters", minNameLength)
+					}
+					return nil
+				}),
+		),
+	)
+
+	if err := tui.RunClean(form.Run); err != nil {
+		return "", err
+	}
+	// Without a terminal huh's Run returns nil immediately, WITHOUT displaying
+	// the form or running the Validate above, so animeName stays empty and the
+	// caller would search for "". The form cannot legitimately complete with an
+	// empty value (Validate enforces a minimum length), so an empty result here
+	// always means "the user was never asked".
+	if strings.TrimSpace(animeName) == "" {
+		return "", errors.New("no anime name entered (no interactive terminal available?)")
+	}
+	return animeName, nil
+}
+
+// TreatingAnimeName removes special characters and spaces from the anime name.
+func TreatingAnimeName(animeName string) string {
+	loweredName := strings.ToLower(animeName)
+	return strings.ReplaceAll(loweredName, " ", "-")
+}
+
+// handleDownloadModeWithSmart processes download args for the download modes
+func handleDownloadModeWithSmart(args []string, isRange, isAll bool, source, quality string) (string, error) {
+
+	if len(args) == 0 {
+		return "", fmt.Errorf("download mode requires anime name and episode number/range")
+	}
+
+	// Download-all mode: goanime -d -a "anime name"
+	if isAll {
+		animeName := strings.Join(args, " ")
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName: animeName,
+			IsAll:     true,
+			Source:    source,
+			Quality:   quality,
+			OutputDir: GlobalOutputDir,
+		}
+		return TreatingAnimeName(animeName), ErrDownloadRequested
+	}
+
+	if isRange {
+		// Range download: goanime -d -r "anime name" start-end
+		if len(args) < 2 {
+			return "", fmt.Errorf("range download requires anime name and episode range (e.g., '1-5')")
+		}
+
+		animeName := strings.Join(args[:len(args)-1], " ")
+		rangeStr := args[len(args)-1]
+
+		// Parse range (e.g., "1-5")
+		rangeParts := strings.Split(rangeStr, "-")
+		if len(rangeParts) != 2 {
+			return "", fmt.Errorf("invalid range format. Use 'start-end' (e.g., '1-5')")
+		}
+
+		startEp, err := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+		if err != nil {
+			return "", fmt.Errorf("invalid start episode number: %s", rangeParts[0])
+		}
+
+		endEp, err := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+		if err != nil {
+			return "", fmt.Errorf("invalid end episode number: %s", rangeParts[1])
+		}
+
+		if startEp > endEp {
+			return "", fmt.Errorf("start episode (%d) cannot be greater than end episode (%d)", startEp, endEp)
+		}
+
+		if startEp < 1 {
+			return "", fmt.Errorf("episode numbers must be positive")
+		}
+
+		// Store download request
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName:    animeName,
+			IsRange:      true,
+			StartEpisode: startEp,
+			EndEpisode:   endEp,
+			Source:       source,
+			Quality:      quality,
+			OutputDir:    GlobalOutputDir,
+		}
+
+		return TreatingAnimeName(animeName), ErrDownloadRequested
+
+	} else {
+		// No episode number provided — show interactive download mode menu
+		// This covers: goanime -d "anime name"
+		animeName := strings.Join(args, " ")
+
+		// Try parsing last arg as episode number first
+		if len(args) >= 2 {
+			episodeStr := args[len(args)-1]
+			if episodeNum, err := strconv.Atoi(episodeStr); err == nil && episodeNum >= 1 {
+				// Last arg is a valid episode number
+				animeName = strings.Join(args[:len(args)-1], " ")
+				GlobalDownloadRequest = &DownloadRequest{
+					AnimeName:  animeName,
+					EpisodeNum: episodeNum,
+					IsRange:    false,
+					Source:     source,
+					Quality:    quality,
+					OutputDir:  GlobalOutputDir,
+				}
+				return TreatingAnimeName(animeName), ErrDownloadRequested
+			}
+		}
+
+		// No episode number — show interactive menu
+		var downloadMode string
+		form := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Download mode for: "+animeName).
+					Options(
+						huh.NewOption("Download ALL episodes", "all"),
+						huh.NewOption("Download a single episode", "single"),
+						huh.NewOption("Download a range of episodes", "range"),
+					).
+					Value(&downloadMode),
+			),
+		)
+
+		if err := tui.RunClean(form.Run); err != nil {
+			return "", fmt.Errorf("download mode selection cancelled: %w", err)
+		}
+
+		switch downloadMode {
+		case "all":
+			GlobalDownloadRequest = &DownloadRequest{
+				AnimeName: animeName,
+				IsAll:     true,
+				Source:    source,
+				Quality:   quality,
+				OutputDir: GlobalOutputDir,
+			}
+			return TreatingAnimeName(animeName), ErrDownloadRequested
+
+		case "single":
+			var episodeStr string
+			inputForm := huh.NewForm(
+				huh.NewGroup(
+					huh.NewInput().
+						Title("Episode number").
+						Description("Enter the episode number to download").
+						Value(&episodeStr).
+						Validate(func(v string) error {
+							if n, err := strconv.Atoi(v); err != nil || n < 1 {
+								return fmt.Errorf("enter a valid positive number")
+							}
+							return nil
+						}),
+				),
+			)
+			if err := tui.RunClean(inputForm.Run); err != nil {
+				return "", fmt.Errorf("episode input cancelled: %w", err)
+			}
+			episodeNum, _ := strconv.Atoi(episodeStr)
+			GlobalDownloadRequest = &DownloadRequest{
+				AnimeName:  animeName,
+				EpisodeNum: episodeNum,
+				IsRange:    false,
+				Source:     source,
+				Quality:    quality,
+				OutputDir:  GlobalOutputDir,
+			}
+			return TreatingAnimeName(animeName), ErrDownloadRequested
+
+		case "range":
+			var startStr, endStr string
+			rangeForm := huh.NewForm(
+				huh.NewGroup(
+					huh.NewInput().
+						Title("Start episode").
+						Description("First episode number").
+						Value(&startStr).
+						Validate(func(v string) error {
+							if n, err := strconv.Atoi(v); err != nil || n < 1 {
+								return fmt.Errorf("enter a valid positive number")
+							}
+							return nil
+						}),
+					huh.NewInput().
+						Title("End episode").
+						Description("Last episode number").
+						Value(&endStr).
+						Validate(func(v string) error {
+							if n, err := strconv.Atoi(v); err != nil || n < 1 {
+								return fmt.Errorf("enter a valid positive number")
+							}
+							return nil
+						}),
+				),
+			)
+			if err := tui.RunClean(rangeForm.Run); err != nil {
+				return "", fmt.Errorf("range input cancelled: %w", err)
+			}
+			startEp, _ := strconv.Atoi(startStr)
+			endEp, _ := strconv.Atoi(endStr)
+			if startEp > endEp {
+				return "", fmt.Errorf("start episode (%d) cannot be greater than end episode (%d)", startEp, endEp)
+			}
+			GlobalDownloadRequest = &DownloadRequest{
+				AnimeName:    animeName,
+				IsRange:      true,
+				StartEpisode: startEp,
+				EndEpisode:   endEp,
+				Source:       source,
+				Quality:      quality,
+				OutputDir:    GlobalOutputDir,
+			}
+			return TreatingAnimeName(animeName), ErrDownloadRequested
+
+		default:
+			return "", fmt.Errorf("unknown download mode selected")
+		}
+	}
+}
+
+// handleUpscaleMode processes upscale command arguments
+func handleUpscaleMode(fs *flag.FlagSet, outputPath string, scaleFactor, passes int, fastMode, hqMode, useGPU bool, bitrate string, workers int) (string, error) {
+	args := fs.Args()
+
+	if len(args) == 0 {
+		return "", fmt.Errorf("upscale mode requires an input file path\nUsage: goanime --upscale <input_file> [options]")
+	}
+
+	inputPath := args[0]
+
+	// Validate input file exists
+	if _, err := os.Stat(inputPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("input file not found: %s", inputPath)
+	}
+
+	// Set default values
+	if scaleFactor < 1 || scaleFactor > 4 {
+		scaleFactor = 2
+	}
+	if passes < 1 || passes > 8 {
+		passes = 2
+	}
+
+	// Determine strength values based on mode
+	strengthColor := 1.0 / 3.0
+	strengthGradient := 1.0
+
+	if hqMode {
+		passes = 4
+		strengthColor = 0.4
+	}
+
+	// Store upscale request
+	GlobalUpscaleRequest = &UpscaleRequest{
+		InputPath:        inputPath,
+		OutputPath:       outputPath,
+		ScaleFactor:      scaleFactor,
+		Passes:           passes,
+		StrengthColor:    strengthColor,
+		StrengthGradient: strengthGradient,
+		FastMode:         fastMode,
+		HighQuality:      hqMode,
+		PreserveAudio:    true,
+		UseGPU:           useGPU,
+		VideoBitrate:     bitrate,
+		Workers:          workers,
+	}
+
+	return inputPath, ErrUpscaleRequested
+}
+
+// handleMovieDownloadMode processes movie/TV download arguments for FlixHQ/SFlix
+func handleMovieDownloadMode(args []string, isRange, isAll bool, quality, subsLanguage, mediaType string) (string, error) {
+	if len(args) == 0 {
+		return "", fmt.Errorf("movie download mode requires movie/TV name\nUsage: goanime -dm \"Movie Name\" (for movies)\n       goanime -dm -r \"TV Show\" season episode-range (for TV episodes)\n       goanime -dm -a \"TV Show\" (download all seasons and episodes)")
+	}
+
+	// Determine if it's a movie or TV download
+	isTV := mediaType == "tv" || isRange || isAll
+
+	// Download-all mode for TV/series/dorama: goanime -dm -a "Show Name"
+	if isAll {
+		showName := strings.Join(args, " ")
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName:    showName,
+			IsAll:        true,
+			IsTV:         true,
+			Quality:      quality,
+			SubsLanguage: subsLanguage,
+			OutputDir:    GlobalOutputDir,
+		}
+		return TreatingAnimeName(showName), ErrMovieDownloadRequested
+	}
+
+	switch {
+	case isTV && isRange:
+		// TV episode range download: goanime -dm -r "TV Show" season start-end
+		if len(args) < 3 {
+			return "", fmt.Errorf("TV episode range download requires show name, season number, and episode range\nUsage: goanime -dm -r \"TV Show\" 1 1-5")
+		}
+
+		showName := strings.Join(args[:len(args)-2], " ")
+		seasonStr := args[len(args)-2]
+		rangeStr := args[len(args)-1]
+
+		// Parse season number
+		seasonNum, err := strconv.Atoi(strings.TrimSpace(seasonStr))
+		if err != nil {
+			return "", fmt.Errorf("invalid season number: %s", seasonStr)
+		}
+
+		// Parse range (e.g., "1-5")
+		rangeParts := strings.Split(rangeStr, "-")
+		if len(rangeParts) != 2 {
+			return "", fmt.Errorf("invalid episode range format. Use 'start-end' (e.g., '1-5')")
+		}
+
+		startEp, err := strconv.Atoi(strings.TrimSpace(rangeParts[0]))
+		if err != nil {
+			return "", fmt.Errorf("invalid start episode number: %s", rangeParts[0])
+		}
+
+		endEp, err := strconv.Atoi(strings.TrimSpace(rangeParts[1]))
+		if err != nil {
+			return "", fmt.Errorf("invalid end episode number: %s", rangeParts[1])
+		}
+
+		if startEp > endEp {
+			return "", fmt.Errorf("start episode (%d) cannot be greater than end episode (%d)", startEp, endEp)
+		}
+
+		if startEp < 1 || seasonNum < 1 {
+			return "", fmt.Errorf("season and episode numbers must be positive")
+		}
+
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName:    showName,
+			IsRange:      true,
+			IsTV:         true,
+			SeasonNum:    seasonNum,
+			StartEpisode: startEp,
+			EndEpisode:   endEp,
+			Quality:      quality,
+			SubsLanguage: subsLanguage,
+			OutputDir:    GlobalOutputDir,
+		}
+
+		return TreatingAnimeName(showName), ErrMovieDownloadRequested
+
+	case isTV:
+		// Single TV episode download: goanime -dm --type tv "TV Show" season episode
+		if len(args) < 3 {
+			return "", fmt.Errorf("TV episode download requires show name, season number, and episode number\nUsage: goanime -dm --type tv \"TV Show\" 1 5")
+		}
+
+		showName := strings.Join(args[:len(args)-2], " ")
+		seasonStr := args[len(args)-2]
+		episodeStr := args[len(args)-1]
+
+		seasonNum, err := strconv.Atoi(strings.TrimSpace(seasonStr))
+		if err != nil {
+			return "", fmt.Errorf("invalid season number: %s", seasonStr)
+		}
+
+		episodeNum, err := strconv.Atoi(strings.TrimSpace(episodeStr))
+		if err != nil {
+			return "", fmt.Errorf("invalid episode number: %s", episodeStr)
+		}
+
+		if seasonNum < 1 || episodeNum < 1 {
+			return "", fmt.Errorf("season and episode numbers must be positive")
+		}
+
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName:    showName,
+			IsTV:         true,
+			SeasonNum:    seasonNum,
+			EpisodeNum:   episodeNum,
+			IsRange:      false,
+			Quality:      quality,
+			SubsLanguage: subsLanguage,
+			OutputDir:    GlobalOutputDir,
+		}
+
+		return TreatingAnimeName(showName), ErrMovieDownloadRequested
+
+	default:
+		// Movie download: goanime -dm "Movie Name"
+		movieName := strings.Join(args, " ")
+
+		GlobalDownloadRequest = &DownloadRequest{
+			AnimeName:    movieName,
+			IsMovie:      true,
+			IsRange:      false,
+			Quality:      quality,
+			SubsLanguage: subsLanguage,
+			OutputDir:    GlobalOutputDir,
+		}
+
+		return TreatingAnimeName(movieName), ErrMovieDownloadRequested
+	}
+}
+
+// Pre-compiled regexes for SanitizeForFilename and related functions (hot path)
+var (
+	bracketTagRe = regexp.MustCompile(`\[(?i:English|Portuguese|Português|PT-BR|Movies?(?:/TV)?|TV|MoviesTV|Unknown|Multilanguage|Multi[ _-]?Subs?|HD|9Anime|SUB|DUB)\]`)
+	ageClassRe   = regexp.MustCompile(`\s+(A\d{1,2}|AL|L)\s*$`)
+	scoreRe      = regexp.MustCompile(`\s+\d{1,2}\.\d{1,2}\s*$`)
+)
+
+// stripSourceMetadata removes the language/source/metadata noise that anime
+// sources append to titles — bracketed tags ([PT-BR], [Movie], [HD], …),
+// trailing parenthesized 9anime metadata, ratings (e.g. "7.27") and age
+// classifications (e.g. "A14", "L") — while leaving the title's own
+// punctuation intact.
+func stripSourceMetadata(name string) string {
+	// Remove bracketed tags: [English], [Multilanguage], [Movie], [9Anime], [HD], etc.
+	name = bracketTagRe.ReplaceAllString(name, "")
+	name = strings.TrimSpace(name)
+
+	// Remove trailing parenthesized 9anime/source metadata.
+	// e.g. "Boruto (HD SUB DUB Ep 293/293)" → "Boruto"
+	// Matches if the parenthesized suffix contains episode numbers, SUB, DUB,
+	// HD, or Multilanguage — i.e. metadata, not a real subtitle like "(Shippuuden)".
+	name = strip9AnimeParenMeta(name)
+
+	// Remove trailing anime source metadata: ratings like "7.27" and age
+	// classifications like "A14", "A12", "A16", "A18", "L", "AL".
+	// These are commonly appended by the anime sources.
+	// Pattern: strip trailing tokens that look like scores or classifications.
+	return stripTrailingAnimeMetadata(name)
+}
+
+// collapseSpaces reduces runs of spaces to one and trims the ends.
+func collapseSpaces(name string) string {
+	for strings.Contains(name, "  ") {
+		name = strings.ReplaceAll(name, "  ", " ")
+	}
+	return strings.TrimSpace(name)
+}
+
+// SanitizeForFilename removes characters that are not allowed in file/directory names
+// and returns a cleaned version of the name suitable for Plex/Jellyfin media libraries.
+// It also strips ratings (e.g. "7.27"), age classifications (e.g. "A14", "L"),
+// and language/source/metadata tags that many anime sources append to titles.
+func SanitizeForFilename(name string) string {
+	name = stripSourceMetadata(name)
+
+	// Remove characters not allowed in filenames across platforms
+	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
+	for _, ch := range invalid {
+		name = strings.ReplaceAll(name, ch, "")
+	}
+	// Remove trailing dots and spaces (problematic on Windows)
+	name = strings.TrimRight(name, ". ")
+	return collapseSpaces(name)
+}
+
+// SanitizeForDisplayTitle cleans a title for on-screen display (mpv window
+// title, Discord presence): source/metadata tags are stripped exactly like
+// SanitizeForFilename, but the title's own punctuation is preserved — display
+// surfaces have no filename restrictions, so "Need for Speed: O Filme" must
+// keep its colon instead of degrading to "Need for Speed O Filme".
+func SanitizeForDisplayTitle(name string) string {
+	return collapseSpaces(stripSourceMetadata(name))
+}
+
+// strip9AnimeParenMeta removes trailing parenthesized metadata appended by 9anime
+// search results, e.g. "(HD SUB DUB Ep 293/293)" or "(Multilanguage SUB Ep 100)".
+// It only strips when the parenthesized part is at the END of the string and looks
+// like metadata (contains keywords like SUB, DUB, HD, Multilanguage, or episode numbers),
+// preserving legitimate subtitle parentheses like "(Shippuuden)" or "(Dublado)".
+func strip9AnimeParenMeta(name string) string {
+	head, suffix, ok := strings.CutLast(name, " (")
+	// Only strip when the " (" exists, isn't at the very start, and the closing
+	// paren is the last character of the string.
+	if !ok || head == "" || !strings.HasSuffix(suffix, ")") {
+		return name
+	}
+	candidate := strings.ToUpper(suffix)
+	isMetadata := strings.Contains(candidate, "SUB") ||
+		strings.Contains(candidate, "DUB") ||
+		strings.Contains(candidate, "HD") ||
+		strings.Contains(candidate, "MULTILANGUAGE") ||
+		strings.Contains(candidate, "MULTI") ||
+		strings.Contains(candidate, "EP ")
+	if isMetadata {
+		return strings.TrimSpace(head)
+	}
+	return name
+}
+
+// stripTrailingAnimeMetadata removes common metadata that anime sources append
+// to titles, such as scores (e.g. "7.27"), age classifications (e.g. "A14", "L"),
+// and other trailing tokens that don't belong in a Plex-style filename.
+//
+// Example: "Black Clover (Dublado) 7.27 A14" → "Black Clover (Dublado)"
+func stripTrailingAnimeMetadata(name string) string {
+	changed := true
+	for changed {
+		changed = false
+		// Strip trailing age classification
+		if loc := ageClassRe.FindStringIndex(name); loc != nil {
+			name = strings.TrimSpace(name[:loc[0]])
+			changed = true
+		}
+		// Strip trailing decimal rating
+		if loc := scoreRe.FindStringIndex(name); loc != nil {
+			name = strings.TrimSpace(name[:loc[0]])
+			changed = true
+		}
+	}
+	return name
+}
+
+// MediaMeta carries external IDs, year, and official title for
+// Plex/Jellyfin-compatible folder naming. Pass nil when metadata is
+// unavailable — all helpers treat a nil *MediaMeta the same as an empty one.
+type MediaMeta struct {
+	OfficialTitle string // Official title from TMDB/AniList (English or Romaji)
+	Year          string // Release year, e.g. "2003"
+	TMDBID        int    // TheMovieDB ID
+	IMDBID        string // IMDB ID, e.g. "tt0369179"
+	AnilistID     int    // AniList ID
+	MalID         int    // MyAnimeList ID
+}
+
+// resolveTitle returns the best available title: OfficialTitle from metadata
+// databases (TMDB, AniList), falling back to the sanitized scraper name.
+func resolveTitle(scraperName string, meta *MediaMeta) string {
+	if meta != nil && meta.OfficialTitle != "" {
+		safe := SanitizeForFilename(meta.OfficialTitle)
+		if safe != "" {
+			return safe
+		}
+	}
+	safe := SanitizeForFilename(scraperName)
+	if safe != "" {
+		return safe
+	}
+	return "Unknown"
+}
+
+// BuildMediaFolderName returns a Plex/Jellyfin-compatible folder name.
+// Format: "<OfficialTitle> (<Year>) {tmdb-123} {imdb-tt456}"
+// Prefers the official title from TMDB/AniList over the scraped name.
+// External IDs use the {source-id} syntax recognised by both Plex and Jellyfin.
+func BuildMediaFolderName(name string, meta *MediaMeta) string {
+	result := resolveTitle(name, meta)
+	if meta == nil {
+		return result
+	}
+
+	// Append year
+	if meta.Year != "" {
+		result += " (" + meta.Year + ")"
+	}
+
+	// Append external IDs in priority order (Plex/Jellyfin {source-id} syntax)
+	if meta.TMDBID > 0 {
+		result += fmt.Sprintf(" {tmdb-%d}", meta.TMDBID)
+	}
+	if meta.IMDBID != "" {
+		result += fmt.Sprintf(" {imdb-%s}", meta.IMDBID)
+	}
+	if meta.AnilistID > 0 {
+		result += fmt.Sprintf(" {anilist-%d}", meta.AnilistID)
+	}
+	if meta.MalID > 0 {
+		result += fmt.Sprintf(" {mal-%d}", meta.MalID)
+	}
+
+	return result
+}
+
+// BuildMediaFileName returns a Plex/Jellyfin-compatible base name for files.
+// Format: "<OfficialTitle> (<Year>)" — external IDs are only on the folder, not the file.
+// Prefers the official title from TMDB/AniList over the scraped name.
+func BuildMediaFileName(name string, meta *MediaMeta) string {
+	title := resolveTitle(name, meta)
+	if meta != nil && meta.Year != "" {
+		return title + " (" + meta.Year + ")"
+	}
+	return title
+}
+
+// DefaultDownloadDir returns the base download directory for anime content.
+// If the user specified a custom directory via -o flag, that is returned.
+// Otherwise returns the default ~/.local/goanime/downloads/anime/ path.
+func DefaultDownloadDir() string {
+	if GlobalOutputDir != "" {
+		return GlobalOutputDir
+	}
+	userHome, _ := os.UserHomeDir()
+	return filepath.Join(userHome, ".local", "goanime", "downloads", "anime")
+}
+
+// DefaultMovieDownloadDir returns the base download directory for movie/TV content.
+// If the user specified a custom directory via -o flag, that is returned.
+// Otherwise returns the default ~/.local/goanime/downloads/movies/ path.
+func DefaultMovieDownloadDir() string {
+	if GlobalOutputDir != "" {
+		return GlobalOutputDir
+	}
+	userHome, _ := os.UserHomeDir()
+	return filepath.Join(userHome, ".local", "goanime", "downloads", "movies")
+}
+
+// FormatPlexMoviePath builds a Plex/Jellyfin-compatible file path for a movie.
+// Format: <baseDir>/<MovieName (Year) {ids}>/<MovieName (Year)>.mp4
+// The folder includes external IDs; the filename includes only name and year.
+func FormatPlexMoviePath(baseDir, movieName, year string, meta ...*MediaMeta) string {
+	var m *MediaMeta
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	// Ensure year is populated from meta if not passed directly
+	if year == "" && m != nil {
+		year = m.Year
+	}
+	// Build a consistent meta for helpers (merge year param)
+	effectiveMeta := &MediaMeta{}
+	if m != nil {
+		*effectiveMeta = *m
+	}
+	if year != "" {
+		effectiveMeta.Year = year
+	}
+
+	folderName := BuildMediaFolderName(movieName, effectiveMeta)
+	fileName := BuildMediaFileName(movieName, effectiveMeta)
+	return filepath.ToSlash(filepath.Join(baseDir, folderName, fileName+".mp4"))
+}
+
+// FormatPlexMovieDir returns the directory path for a Plex-compatible movie.
+// Format: <baseDir>/<MovieName (Year) {ids}>/
+func FormatPlexMovieDir(baseDir, movieName string, meta ...*MediaMeta) string {
+	var m *MediaMeta
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	folderName := BuildMediaFolderName(movieName, m)
+	return filepath.ToSlash(filepath.Join(baseDir, folderName))
+}
+
+// FormatPlexEpisodePath builds a Plex/Jellyfin-compatible file path for an episode.
+// Format: <baseDir>/<Name (Year) {ids}>/Season XX/<Name (Year)> - SXXeXX.mp4
+// The folder includes external IDs; the filename includes name, year, and episode info.
+func FormatPlexEpisodePath(baseDir, animeName string, season, episodeNum int, meta ...*MediaMeta) string {
+	var m *MediaMeta
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	folderName := BuildMediaFolderName(animeName, m)
+	fileName := BuildMediaFileName(animeName, m)
+	if season < 1 {
+		season = 1
+	}
+	seasonDir := fmt.Sprintf("Season %02d", season)
+	filename := fmt.Sprintf("%s - S%02dE%02d.mp4", fileName, season, episodeNum)
+	return filepath.ToSlash(filepath.Join(baseDir, folderName, seasonDir, filename))
+}
+
+// FormatPlexEpisodeDir returns the directory path for a Plex-compatible anime season.
+// Format: <baseDir>/<Name (Year) {ids}>/Season XX/
+func FormatPlexEpisodeDir(baseDir, animeName string, season int, meta ...*MediaMeta) string {
+	var m *MediaMeta
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	folderName := BuildMediaFolderName(animeName, m)
+	if season < 1 {
+		season = 1
+	}
+	seasonDir := fmt.Sprintf("Season %02d", season)
+	return filepath.ToSlash(filepath.Join(baseDir, folderName, seasonDir))
+}
+
+// PlexEpisodeFilename returns just the filename part in Plex format.
+// Format: <Name (Year)> - SXXeXX.mp4
+func PlexEpisodeFilename(animeName string, season, episodeNum int, meta ...*MediaMeta) string {
+	var m *MediaMeta
+	if len(meta) > 0 {
+		m = meta[0]
+	}
+	fileName := BuildMediaFileName(animeName, m)
+	if season < 1 {
+		season = 1
+	}
+	return fmt.Sprintf("%s - S%02dE%02d.mp4", fileName, season, episodeNum)
+}

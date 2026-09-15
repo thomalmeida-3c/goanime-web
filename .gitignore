@@ -1,0 +1,12 @@
+# Backend
+backend/goanime-server
+backend/*.exe
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/next-env.d.ts
+
+# OS
+.DS_Store

@@ -1,0 +1,114 @@
+package util
+
+import (
+	"bytes"
+	"io"
+	"testing"
+
+	"charm.land/log/v2"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSuppressConsoleLoggingKeepsFileLoggingAndRestoresNestedState(t *testing.T) {
+	previousLogger := Logger
+	previousFileLogger := fileLogger
+	previousSuppressions := consoleLogSuppressions
+	t.Cleanup(func() {
+		Logger = previousLogger
+		fileLogger = previousFileLogger
+		consoleLogSuppressions = previousSuppressions
+	})
+
+	var fileBuf bytes.Buffer
+	Logger = log.NewWithOptions(io.Discard, log.Options{Prefix: "test"})
+	fileLogger = log.NewWithOptions(&fileBuf, log.Options{Prefix: "file-test"})
+	consoleLogSuppressions = 0
+
+	restoreOuter := SuppressConsoleLogging()
+	restoreInner := SuppressConsoleLogging()
+	if consoleLogSuppressions != 2 {
+		t.Fatalf("consoleLogSuppressions = %d, want 2", consoleLogSuppressions)
+	}
+
+	Warn("AnimeFire source returned 404, retrying fallback source", "episode", 20)
+	if !bytes.Contains(fileBuf.Bytes(), []byte("AnimeFire source returned 404")) {
+		t.Fatalf("suppressed console logging must still write diagnostics to file logger; got %q", fileBuf.String())
+	}
+
+	restoreOuter()
+	if consoleLogSuppressions != 1 {
+		t.Fatalf("consoleLogSuppressions after outer restore = %d, want 1", consoleLogSuppressions)
+	}
+
+	restoreOuter()
+	if consoleLogSuppressions != 1 {
+		t.Fatalf("restore must be idempotent; consoleLogSuppressions = %d, want 1", consoleLogSuppressions)
+	}
+
+	restoreInner()
+	if consoleLogSuppressions != 0 {
+		t.Fatalf("consoleLogSuppressions after inner restore = %d, want 0", consoleLogSuppressions)
+	}
+}
+
+func TestDebugf_IsDebugFalse(t *testing.T) {
+	// IsDebug = false → Debugf is a no-op (early return).
+	// Cannot be parallel — modifies package-level vars.
+	prev := IsDebug
+	IsDebug = false
+	t.Cleanup(func() { IsDebug = prev })
+
+	assert.NotPanics(t, func() { Debugf("should not write anything: %s", "test") })
+}
+
+func TestDebugf_IsDebugTrueWithFileLogger(t *testing.T) {
+	// IsDebug = true + fileLogger != nil → writeToFile branch.
+	prevDebug := IsDebug
+	prevFile := fileLogger
+	t.Cleanup(func() {
+		IsDebug = prevDebug
+		fileLogger = prevFile
+	})
+
+	var buf bytes.Buffer
+	IsDebug = true
+	fileLogger = log.NewWithOptions(&buf, log.Options{Prefix: "test"})
+
+	assert.NotPanics(t, func() { Debugf("hello %s", "world") })
+}
+
+func TestDebugf_IsDebugTrueWithConsoleLogger(t *testing.T) {
+	// IsDebug = true + fileLogger == nil + Logger != nil → Logger.Debug branch.
+	prevDebug := IsDebug
+	prevFile := fileLogger
+	prevLog := Logger
+	t.Cleanup(func() {
+		IsDebug = prevDebug
+		fileLogger = prevFile
+		Logger = prevLog
+	})
+
+	IsDebug = true
+	fileLogger = nil
+	Logger = log.NewWithOptions(io.Discard, log.Options{Prefix: "test"})
+
+	assert.NotPanics(t, func() { Debugf("debug %d", 42) })
+}
+
+func TestDebugf_IsDebugTrueNoLoggers(t *testing.T) {
+	// IsDebug = true + fileLogger == nil + Logger == nil → no write, no panic.
+	prevDebug := IsDebug
+	prevFile := fileLogger
+	prevLog := Logger
+	t.Cleanup(func() {
+		IsDebug = prevDebug
+		fileLogger = prevFile
+		Logger = prevLog
+	})
+
+	IsDebug = true
+	fileLogger = nil
+	Logger = nil
+
+	assert.NotPanics(t, func() { Debugf("silent %s", "debug") })
+}

@@ -1,0 +1,200 @@
+package playback
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/alvarorichard/Goanime/internal/api"
+	"github.com/alvarorichard/Goanime/internal/discord"
+	"github.com/alvarorichard/Goanime/internal/models"
+	"github.com/alvarorichard/Goanime/internal/player"
+	"github.com/alvarorichard/Goanime/internal/util"
+)
+
+// HandleMovie gerencia a reprodução de filmes/OVAs
+func HandleMovie(ctx context.Context, anime *models.Anime, episodes []models.Episode, discordEnabled bool) error {
+	// Prepare the mpv path while metadata/stream work is in progress.
+	player.PreWarmMPVPath()
+
+	for {
+		animeMutex := sync.Mutex{}
+		isPaused := false
+
+		animeMutex.Lock()
+		anime.Episodes = []models.Episode{episodes[0]}
+		animeMutex.Unlock()
+
+		// Only fetch movie data from Jikan API for anime content (not FlixHQ movies/TV)
+		// FlixHQ content already has metadata from TMDB/OMDb
+		if !anime.IsMovieOrTV() && anime.MalID > 0 {
+			if err := api.GetMovieData(anime.MalID, anime); err != nil {
+				log.Printf("Error fetching movie/OVA data: %v", err)
+			}
+		}
+
+		var videoURL string
+		var videoErr error
+
+		// Use static log instead of spinner while fetching video URL
+		// to avoid terminal UI contention if a quality picker opens.
+		util.Infof("Loading video stream...")
+		videoURL, videoErr = player.GetVideoURLForEpisodeEnhanced(ctx, &episodes[0], anime)
+
+		if videoErr != nil {
+			log.Printf("Failed to extract video URL: %v", util.ErrorHandler(videoErr))
+			// Return to anime selection
+			return player.ErrBackToAnimeSelection
+		}
+
+		episodeDuration := time.Duration(episodes[0].Duration) * time.Second
+		updater := createUpdater(anime, &isPaused, &animeMutex, episodeDuration, discordEnabled)
+
+		// Route downloads to the correct directory (anime/ vs movies/) using exact media type
+		player.SetExactMediaType(string(anime.MediaType))
+
+		// Store external IDs for Plex/Jellyfin-compatible folder naming
+		player.SetMediaMeta(&util.MediaMeta{
+			OfficialTitle: anime.OfficialTitle(),
+			Year:          anime.Year,
+			TMDBID:        anime.TMDBID,
+			IMDBID:        anime.IMDBID,
+			AnilistID:     anime.AnilistID,
+			MalID:         anime.MalID,
+		})
+
+		playErr := player.HandleDownloadAndPlay(
+			videoURL,
+			episodes,
+			1,
+			anime.URL,
+			episodes[0].Number,
+			anime.MalID,
+			anime.AnilistID,
+			updater,
+			anime.Name,
+			anime.CurrentSeason,
+			anime,
+		)
+
+		if updater != nil {
+			updater.Stop()
+		}
+
+		// Handle playback errors and user interaction
+		if errors.Is(playErr, player.ErrUserQuit) {
+			log.Println("Quitting application as per user request.")
+			break
+		}
+
+		// Check if user requested to change anime during video playback
+		if errors.Is(playErr, player.ErrChangeAnime) {
+			newAnime, newEpisodes, changeErr := ChangeAnimeLocal()
+			if changeErr != nil {
+				log.Printf("Error changing anime: %v", changeErr)
+				continue // Stay with current anime if change fails
+			}
+
+			// Update anime and episodes
+			anime = newAnime
+			episodes = newEpisodes
+
+			// Check if new anime is a series using media type first, then episode count as fallback
+			// This avoids re-fetching episodes which would cause duplicate season selection for FlixHQ
+			totalEpisodes := len(newEpisodes)
+			series := !newAnime.IsMovie() && totalEpisodes > 1
+			if series {
+				// If new anime is a series, switch to series handler
+				log.Printf("Switched to series: %s with %d episodes.\n", anime.Name, totalEpisodes)
+				if seriesErr := HandleSeries(ctx, anime, episodes, totalEpisodes, discordEnabled); seriesErr != nil {
+					if errors.Is(seriesErr, player.ErrBackToAnimeSelection) {
+						return seriesErr
+					}
+				}
+				break
+			}
+
+			fmt.Printf("Switched to movie: %s\n", anime.Name)
+			continue // Continue with new movie
+		}
+
+		if playErr != nil {
+			log.Printf("Error during movie playback: %v", playErr)
+		}
+
+		// Ask user what to do next after movie finishes
+		userInput := GetUserInput(true)
+		if userInput == "q" {
+			log.Println("Quitting application as per user request.")
+			break
+		}
+
+		// Handle back/change anime for movies - both options allow searching for a new anime
+		if userInput == "c" || userInput == "back" {
+			newAnime, newEpisodes, err := ChangeAnimeLocal()
+			if err != nil {
+				log.Printf("Error changing anime: %v", err)
+				continue // Stay with current anime if change fails
+			}
+
+			// Update anime and episodes
+			anime = newAnime
+			episodes = newEpisodes
+
+			// Check if new anime is a series using media type first, then episode count as fallback
+			// This avoids re-fetching episodes which would cause duplicate season selection for FlixHQ
+			totalEpisodes := len(newEpisodes)
+			series := !newAnime.IsMovie() && totalEpisodes > 1
+			if series {
+				// If new anime is a series, switch to series handler
+				log.Printf("Switched to series: %s with %d episodes.\n", anime.Name, totalEpisodes)
+				if err := HandleSeries(ctx, anime, episodes, totalEpisodes, discordEnabled); err != nil {
+					if errors.Is(err, player.ErrBackToAnimeSelection) {
+						return err
+					}
+				}
+				break
+			}
+
+			fmt.Printf("Switched to movie: %s\n", anime.Name)
+			continue // Continue with new movie
+		}
+
+		// For movies, other navigation options don't make much sense, so just continue playing the same movie
+		log.Println("Replaying the same movie...")
+	}
+	return nil
+}
+
+// createUpdater cria um atualizador de Discord Rich Presence se estiver habilitado
+func createUpdater(anime *models.Anime, isPaused *bool, animeMutex *sync.Mutex, episodeDuration time.Duration, discordEnabled bool) *discord.RichPresenceUpdater {
+	if !discordEnabled {
+		return nil
+	}
+	// Use 3 second update interval for precise timing sync
+	// Discord timestamps need regular updates to stay accurate
+	return discord.NewRichPresenceUpdater(
+		anime,
+		isPaused,
+		animeMutex,
+		3*time.Second,
+		episodeDuration,
+		getSocketPath(),
+		player.MpvSendCommand,
+	)
+}
+
+// getSocketPath retorna o caminho do socket MPV baseado no sistema operacional
+func getSocketPath() string {
+	if runtime.GOOS == "windows" {
+		return `\\.\pipe\goanime_mpvsocket`
+	}
+	// Use os.TempDir() for macOS compatibility
+	return filepath.Join(os.TempDir(), "mpvsocket")
+}

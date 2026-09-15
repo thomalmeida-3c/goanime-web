@@ -1,0 +1,34 @@
+main.exe
+main
+.main
+.idea
+
+# Compiled Object files
+
+*.slo
+*.lo
+
+# Compiled Dynamic libraries
+
+*.so
+*.dylib
+*.dll
+result
+
+# Local build binaries
+goanime
+goanime-test
+build/goanime-local
+
+#Ignore vscode AI rules
+.github/copilot-instructions.md
+
+#Ignore MacOS system files junk
+.DS_Store
+
+#claude
+claude
+.claude
+
+# folder .tokensave
+.tokensave/
