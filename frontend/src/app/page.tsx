@@ -123,6 +123,15 @@ export default function Home() {
     setVideoSrc(null);
   }
 
+  const currentEpisodeIndex = selectedEpisode
+    ? episodes.findIndex((ep) => ep.URL === selectedEpisode.URL)
+    : -1;
+  const previousEpisode = currentEpisodeIndex > 0 ? episodes[currentEpisodeIndex - 1] : null;
+  const nextEpisode =
+    currentEpisodeIndex >= 0 && currentEpisodeIndex < episodes.length - 1
+      ? episodes[currentEpisodeIndex + 1]
+      : null;
+
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100">
       <header className="sticky top-0 z-10 border-b border-neutral-800 px-6 py-3 backdrop-blur">
@@ -260,23 +269,67 @@ export default function Home() {
         )}
 
         {view === "player" && selectedAnime && selectedEpisode && (
-          <>
+          <div className="px-6 py-6">
             <button
               onClick={backToEpisodes}
               className="mb-4 text-sm text-neutral-400 hover:text-neutral-200"
             >
               ← Voltar para episódios
             </button>
-            <h2 className="mb-1 text-lg font-semibold">
-              {selectedAnime.Name} — {selectedEpisode.Number}
-            </h2>
-            <p className="mb-4 text-sm text-neutral-400">{selectedAnime.Source}</p>
 
-            {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
-            {loading && <p className="text-sm text-neutral-400">Resolvendo stream...</p>}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div className="lg:col-span-2">
+                <h2 className="mb-1 text-lg font-semibold">
+                  {selectedAnime.Name} — {selectedEpisode.Number}
+                </h2>
+                <p className="mb-4 text-sm text-neutral-400">{selectedAnime.Source}</p>
 
-            {videoSrc && <UpscaledVideoPlayer key={videoSrc} src={videoSrc} />}
-          </>
+                {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+                {loading && <p className="text-sm text-neutral-400">Resolvendo stream...</p>}
+
+                {videoSrc && <UpscaledVideoPlayer key={videoSrc} src={videoSrc} />}
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => previousEpisode && handleSelectEpisode(previousEpisode)}
+                    disabled={!previousEpisode}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-neutral-600 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    ← Episódio anterior
+                  </button>
+                  <button
+                    onClick={() => nextEpisode && handleSelectEpisode(nextEpisode)}
+                    disabled={!nextEpisode}
+                    className="rounded-md border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm hover:border-neutral-600 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Próximo episódio →
+                  </button>
+                </div>
+              </div>
+
+              <div className="lg:col-span-1">
+                <h3 className="mb-3 text-sm font-semibold text-neutral-300">Episódios</h3>
+                <div className="grid max-h-[540px] grid-cols-1 gap-2 overflow-y-auto pr-1">
+                  {episodes.map((ep, i) => {
+                    const isCurrent = ep.URL === selectedEpisode.URL;
+                    return (
+                      <button
+                        key={`${ep.URL}-${i}`}
+                        onClick={() => handleSelectEpisode(ep)}
+                        className={`rounded-md border px-4 py-2 text-left text-sm ${
+                          isCurrent
+                            ? "border-purple-500 bg-purple-900/20 text-white"
+                            : "border-neutral-800 bg-neutral-900 hover:border-neutral-600"
+                        }`}
+                      >
+                        {ep.Number}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>
