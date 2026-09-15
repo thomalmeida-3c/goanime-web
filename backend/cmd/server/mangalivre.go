@@ -45,18 +45,14 @@ func mangaLivreGet(ctx context.Context, rawURL string) (*goquery.Document, error
 	return goquery.NewDocumentFromReader(resp.Body)
 }
 
-// searchMangaLivre uses the theme's plain WordPress search (?s=) — no AJAX
-// endpoint needed, the results page already renders full manga cards.
-func searchMangaLivre(ctx context.Context, query string, limit int) ([]MangaItem, error) {
-	u := mangaLivreBase + "/?s=" + url.QueryEscape(query)
-	doc, err := mangaLivreGet(ctx, u)
-	if err != nil {
-		return nil, err
-	}
-
+// parseMangaLivreCards extracts manga cards from any Madara listing page —
+// the search results page and the catalog/listing pages use different
+// wrapper classes (.c-tabs-item__content vs .page-item-detail) but the same
+// inner .post-title a / img markup, so one parser covers both.
+func parseMangaLivreCards(doc *goquery.Document, cardSelector string, limit int) []MangaItem {
 	var items []MangaItem
 	seen := make(map[string]bool)
-	doc.Find(".c-tabs-item__content").EachWithBreak(func(_ int, card *goquery.Selection) bool {
+	doc.Find(cardSelector).EachWithBreak(func(_ int, card *goquery.Selection) bool {
 		if len(items) >= limit {
 			return false
 		}
@@ -68,7 +64,7 @@ func searchMangaLivre(ctx context.Context, query string, limit int) ([]MangaItem
 		}
 		seen[href] = true
 
-		cover, _ := card.Find(".tab-thumb img").Attr("src")
+		cover, _ := card.Find("img").First().Attr("src")
 
 		items = append(items, MangaItem{
 			ID:       href,
@@ -78,7 +74,30 @@ func searchMangaLivre(ctx context.Context, query string, limit int) ([]MangaItem
 		})
 		return true
 	})
-	return items, nil
+	return items
+}
+
+// searchMangaLivre uses the theme's plain WordPress search (?s=) — no AJAX
+// endpoint needed, the results page already renders full manga cards.
+func searchMangaLivre(ctx context.Context, query string, limit int) ([]MangaItem, error) {
+	u := mangaLivreBase + "/?s=" + url.QueryEscape(query)
+	doc, err := mangaLivreGet(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	return parseMangaLivreCards(doc, ".c-tabs-item__content", limit), nil
+}
+
+// fetchMangaLivrePopular reads the site's own "Mangás Mais Lidos" (most
+// read, ordered by views) catalog page — real popularity data from the
+// source itself, same idea as MangaDex's followedCount ordering.
+func fetchMangaLivrePopular(ctx context.Context, limit int) ([]MangaItem, error) {
+	u := mangaLivreBase + "/manga/?m_orderby=views"
+	doc, err := mangaLivreGet(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	return parseMangaLivreCards(doc, ".page-item-detail", limit), nil
 }
 
 // mangaChapterNumRe pulls the leading number out of a chapter link's label

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -24,10 +23,11 @@ func registerMangaRoutes(mux *http.ServeMux) {
 }
 
 // handleMangaHome serves the "popular" manga row, cached like /api/home —
-// same reasoning: cheap to cache, no reason to hit MangaDex on every load.
-// MangaLivre doesn't expose anything like a follower-count ranking, so this
-// row stays MangaDex-only; MangaLivre's value is in search/reading, where
-// its full chapter runs matter more than home-page ranking.
+// same reasoning: cheap to cache, no reason to hit the source on every
+// load. MangaDex support (mangadex.go) is still here and working, just not
+// wired into the listing right now — MangaLivre alone is what's shown, per
+// request; swapping back (or fanning both out like /api/search does for
+// anime) is a one-line change in this handler if that's wanted later.
 func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	mangaHomeCacheMu.Lock()
 	if mangaHomeCache != nil && time.Since(mangaHomeCacheAt) < mangaHomeCacheTTL {
@@ -41,7 +41,7 @@ func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	items, err := fetchMangaDexPopular(ctx, 18)
+	items, err := fetchMangaLivrePopular(ctx, 18)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -55,11 +55,8 @@ func handleMangaHome(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"popular": items})
 }
 
-// handleMangaSearch fans out to both sources in parallel and merges the
-// results, then re-ranks the combined list by relevance to the query so the
-// best title match wins regardless of which source found it — otherwise a
-// MangaDex spinoff and a MangaLivre main series would just land in
-// source-then-source order instead of best-match-first.
+// handleMangaSearch searches MangaLivre only (see handleMangaHome's note —
+// MangaDex is still there, just not called from the listing right now).
 func handleMangaSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
@@ -70,26 +67,9 @@ func handleMangaSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	var (
-		wg                   sync.WaitGroup
-		dexItems, livreItems []MangaItem
-		dexErr, livreErr     error
-	)
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		dexItems, dexErr = searchMangaDex(ctx, q, 24)
-	}()
-	go func() {
-		defer wg.Done()
-		livreItems, livreErr = searchMangaLivre(ctx, q, 24)
-	}()
-	wg.Wait()
-
-	items := append(dexItems, livreItems...)
-	if len(items) == 0 && (dexErr != nil || livreErr != nil) {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("mangadex: %v, mangalivre: %v", dexErr, livreErr))
+	items, err := searchMangaLivre(ctx, q, 24)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
 		return
 	}
 
